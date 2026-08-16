@@ -38,6 +38,7 @@ The analysis materials include:
 - Comparisons by gender using Welch's two-sample t-test
 - Reproduction of Tables 2 and 3
 - Reproducibility output generated from the analysis code
+- See the html version of the composite score analysis and Tables 2-3 on (https://rpubs.com/Dr_Hasan/1452564)
 
 ### `Survey_Questions/`
 
