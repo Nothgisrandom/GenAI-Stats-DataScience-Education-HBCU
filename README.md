@@ -1,64 +1,97 @@
-# GenAI-Stats-DataScience-Education-HBCU
-Survey study of GenAI use and perceptions among statistics and data science students and faculty at an HBCU, examining familiarity, AI literacy, perceived benefits and limitations, subgroup differences, instructional needs, and implications for responsible GenAI integration in data science education.
+ # GenAI-Stats-DataScience-Education-HBCU
 
-\# AI4DS Repository
+This repository contains the data, analysis code, reproducibility output, and survey materials associated with the study:
 
-This repository accompanies the paper:
+**Perceptions and Utilization of GenAI Tools among Data Science Students and Faculty**
 
-Perceptions and Utilization of GenAI Tools among Data Science Students and Faculty 
-The full text article is available at:
-https://doi.org/10.6339/26-JDS1233  
+Abeer M. Hasan and Sayed A. Mostafa  
+Department of Mathematics & Statistics  
+North Carolina A&T State University, Greensboro, NC, USA
 
-Hasan, A. M., \& Mostafa, S. A. 
+## Study Overview
 
-Department of Mathematics \& Statistics, 
-North Carolina A\&T State University, Greensboro, NC, USA
+This study examines the use and perceptions of generative artificial intelligence (GenAI) among statistics and data science students and faculty at a Historically Black College or University (HBCU). The study investigates familiarity with GenAI tools, usage patterns, perceived benefits and limitations, AI literacy, subgroup differences, faculty instructional practices, and institutional support needs.
 
-Citation: Abeer M. Hasan, Sayed A. Mostafa, Perceptions and Utilization of GenAI Tools Among Data Science Students and Faculty, J. data sci.(2026), 1-17, DOI 10.6339/26-JDS1233
+The analyses are based on **119 valid student responses and 14 faculty responses**.
 
+## Publication
 
-\## Repository Structure
+Hasan, A. M., & Mostafa, S. A. (2026).  
+**Perceptions and Utilization of GenAI Tools among Data Science Students and Faculty.**  
+*Journal of Data Science*, 1–17.  
+DOI: [10.6339/26-JDS1233](https://doi.org/10.6339/26-JDS1233)
 
-\- `data/` — analytic data files used in the study  
+## Repository Structure
 
-\- `Survey/` — survey instruments and related materials  
+### `Data&Code/`
 
-\- `RCode/` — R scripts and R Markdown files used for data preparation, analysis, and figure generation  
+Contains the de-identified analytic data and R/R Markdown files used to reproduce the analyses reported in the manuscript.
 
-\- `Student_figures/` — figures generated from the student survey analyses  
+The analysis materials include:
 
-\- `Faculty_figures/` — figures generated from the faculty survey analyses  
+- Student survey data preparation and descriptive analyses
+- Faculty survey data preparation and descriptive analyses
+- Construction of student composite scores
+- Confirmatory factor analysis (CFA)
+- Reliability analysis using Cronbach's alpha
+- Comparisons by academic class level using one-way ANOVA and Tukey HSD
+- Comparisons by gender using Welch's two-sample t-test
+- Reproduction of Tables 2 and 3
+- Reproducibility output generated from the analysis code
 
-\- `README.md` — repository overview and reproduction guide  
+### `Survey_Questions/`
 
+Contains the student and faculty survey instruments and related survey documentation used in the study.
 
+### `LICENSE`
 
-\## **Reproducing the Analysis**
+Contains the repository license information.
 
-To reproduce the results reported in the paper:
+## Reproducing the Analysis
 
-1\. Use the files in `data/` as the analytic input data.
+To reproduce the analyses reported in the manuscript:
 
-2\. Run the analysis files in `RCode/` to prepare data, construct composite scores, perform statistical analyses, and generate figures.
+1. Download or clone this repository.
+2. Retain the existing repository folder structure.
+3. Use the de-identified data files in `Data&Code/` as the analytic input.
+4. Run the R or R Markdown analysis files from the repository using relative file paths.
+5. Compare the resulting output with the rendered reproducibility output included in `Data&Code/`.
 
-3\. Review output figures in `Student\_figures/` and `Faculty\_figures/`.
+The composite-score analysis reproduces the confirmatory factor analyses, reliability estimates, and student subgroup comparisons reported in **Tables 2 and 3** of the manuscript.
 
+Because respondents could skip individual survey questions, analytic sample sizes may vary across items, composite scores, and statistical analyses.
 
+## Software and Reproducibility
 
-\## Software
-All analyses were conducted in \*\*R\*\* using \*\*R Markdown\*\*. Required packages are listed in the setup sections of the code files.
+Analyses were conducted using **R** and **R Markdown**. Required packages are identified in the setup sections of the analysis files.
 
-\## Notes
-This repository is intended to support transparency and reproducibility of the analyses reported in the paper. All code should be run using file paths relative to the repository root.
+The reproducibility workflow records the R and package environment used for the final analyses and uses repository-relative file paths to facilitate replication on different systems.
 
+## Relationship to the AI4DS Project
 
-\## Contact
-\*\*Abeer M. Hasan\*\*  
+This study is associated with the broader **AI4DS (Artificial Intelligence for Data Science Education)** project, which focuses on the responsible integration of generative AI into statistics and data science education.
 
-Department of Mathematics \& Statistics  
+For the broader project, related educational activities, and additional AI4DS resources, see:
 
-North Carolina A\&T State University  
+[AI4DS Project Repository](https://github.com/Nothgisrandom/AI4DS)
 
-Greensboro, NC, USA
+This repository serves as the **publication-specific reproducibility archive** for the GenAI student and faculty survey study.
 
-Email: amhasan1@ncat.edu
+## Citation
+
+If you use the data, code, survey materials, or findings from this repository in scholarly work, please cite the associated publication:
+
+> Hasan, A. M., & Mostafa, S. A. (2026). *Perceptions and Utilization of GenAI Tools among Data Science Students and Faculty*. Journal of Data Science, 1–17. https://doi.org/10.6339/26-JDS1233
+
+## License
+
+This repository is distributed under the **Apache License 2.0**. See the `LICENSE` file for details.
+
+## Contact
+
+**Abeer M. Hasan**  
+Department of Mathematics & Statistics  
+North Carolina A&T State University  
+Greensboro, NC, USA  
+
+Email: [amhasan1@ncat.edu](mailto:amhasan1@ncat.edu)
