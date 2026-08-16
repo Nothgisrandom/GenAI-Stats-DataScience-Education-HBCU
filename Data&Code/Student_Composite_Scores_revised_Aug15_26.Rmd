@@ -1,0 +1,1086 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Reproducible analysis of the student composite score analysis
+
+
+```{r setup-student-analysis, warning=FALSE, message=FALSE}
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  dplyr, janitor, ggplot2, rlang, ggmosaic, knitr, forcats, tidyr,
+  stringr, psych, readxl, scales, kableExtra, grid, tibble, lavaan, infer
+)
+
+# Create output directory for saved figures
+if (!dir.exists("Student_figures")) dir.create("Student_figures", recursive = TRUE)
+
+find_student_file <- function() {
+  candidates <- c(
+    "AI4DS_Student_Survey_October_5_ 2025.xlsx",
+    file.path("data", "AI4DS_Student_Survey_October_5_ 2025.xlsx"),
+    # Allows knitting from the RCode/ directory in the repository.
+    file.path("..", "data", "AI4DS_Student_Survey_October_5_ 2025.xlsx")
+  )
+  found <- candidates[file.exists(candidates)]
+  if (length(found) == 0) {
+    stop(
+      "Student survey Excel file not found. ",
+      "Expected it in the repo root, data/, or ../data/ relative to the working directory. ",
+      "Update `find_student_file()` only if the repository structure has changed."
+    )
+  }
+  found[[1]]
+}
+
+load_student_data <- function(path = find_student_file(), min_duration = 120, min_progress = 25) {
+  raw_preview <- readxl::read_excel(path)
+  short <- readxl::read_excel(path, range = "A1:BN1", col_names = FALSE) |> unlist() |> as.character()
+  long  <- readxl::read_excel(path, range = "A2:BN2", col_names = FALSE) |> unlist() |> as.character()
+  n_cols <- ncol(raw_preview)
+  short <- short[seq_len(n_cols)]
+  long  <- long[seq_len(n_cols)]
+  student_df <- readxl::read_excel(path, skip = 2, col_names = short)
+  student_header_labels <- setNames(long, short)
+  filtered_df <- student_df |>
+    dplyr::filter(`Duration (in seconds)` >= min_duration, Progress >= min_progress)
+  list(student_header_preview = raw_preview, student_data_raw = student_df, student_data_filtered = filtered_df, student_header_labels = student_header_labels)
+}
+```
+
+```{r import-student-data, warning=FALSE, message=FALSE}
+student_data_path <- find_student_file()
+student_import <- load_student_data(student_data_path)
+student_header_preview <- student_import$student_header_preview
+student_data_raw <- student_import$student_data_raw
+student_data_filtered <- student_import$student_data_filtered
+student_header_labels <- student_import$student_header_labels
+
+cat("Remaining sample size after quality filters:", nrow(student_data_filtered), "students\n")
+
+dim(student_data_filtered)
+```
+
+
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+
+
+questions <- student_data_filtered |>
+  select(
+    starts_with("Q10_"),
+    starts_with("Q12_"),
+    starts_with("Q18_"),
+    starts_with("Q15_"),
+    starts_with("Q21_")
+  ) |>
+  select(
+    Q10_1, Q10_2, Q10_3, Q10_4, Q10_5,
+    Q12_1, Q12_2, Q12_3, Q12_4,
+    Q18_1, Q18_2, Q18_3, Q18_4, Q18_5,
+    Q21_1, Q21_2, Q21_3, Q21_4, Q21_5,
+    Q15_4
+  )
+
+
+missing_summary <- questions |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "Question",
+    values_to = "Response"
+  ) |>
+  group_by(Question) |>
+  summarise(
+  Valid_Responses = sum(!is.na(Response)),
+  Missing_Count = sum(is.na(Response)),
+  Percent_Missing = round(100 * Missing_Count / n(), 2),
+  Percent_Not_Missing = round(100 * Valid_Responses / n(), 2),
+  .groups = "drop"
+)
+
+
+  missing_summary
+
+
+```
+
+
+# Familiarity Score Q10
+
+## How familiar are you with the following AI technologies in data science?
+
+
+**CLASS GROUPS AND RECODING**
+
+
+```{r CLASS GROUPS AND RECODING}
+
+# Class Groups
+# In the initial survey version, "Graduate Student" was not available  as a Q5 response option. Review of the reported-major field established that respondents with missing Q5 values in this portion  of the data were graduate students. The analysis therefore recoded #these Q5 missing values as Graduate Student;
+
+
+student_data_filtered <- student_data_filtered %>%
+  mutate(
+    Q5 = replace_na(Q5, "Graduate Student"),
+    Q5 = factor(Q5, levels = c("Freshman", "Sophomore", "Junior", "Senior", "Graduate Student")))
+
+student_data_filtered <- student_data_filtered |>
+  mutate(
+    class_group = case_when(
+      Q5 %in% c("Freshman", "Sophomore") ~ "Lower Division",
+      Q5 %in% c("Junior", "Senior")      ~ "Upper Division",
+      Q5 == "Graduate Student"           ~ "Graduate",
+      TRUE                               ~ NA_character_
+    )
+  )
+
+
+student_data_filtered <- student_data_filtered |>
+  mutate(  class_group = factor(class_group, levels = c("Lower Division","Upper Division", "Graduate")))
+
+# Recoding to numeric
+
+
+student_data_filtered <- student_data_filtered |>
+  mutate(Q10_1 =
+           recode(Q10_1,
+                  "Not at All Familiar" = 1,
+                  "Not Very Familiar" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Familiar" = 4,
+                  "Very Familiar" = 5),
+        Q10_2 = 
+              recode(Q10_2,
+                "Not at All Familiar" = 1,
+                "Not Very Familiar" = 2,
+                "Neutral" = 3,
+                "Somewhat Familiar" = 4,
+                "Very Familiar" = 5),
+        Q10_3 =
+         recode(Q10_3,
+                  "Not at All Familiar" = 1,
+                  "Not Very Familiar" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Familiar" = 4,
+                  "Very Familiar" = 5),
+         Q10_4 = 
+         recode(Q10_4,
+                  "Not at All Familiar" = 1,
+                  "Not Very Familiar" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Familiar" = 4,
+                  "Very Familiar" = 5),
+        Q10_5 =
+         recode(Q10_5,
+                "Not at All Familiar" = 1,
+                  "Not Very Familiar" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Familiar" = 4,
+                  "Very Familiar" = 5))
+
+
+
+head(student_data_filtered)
+
+
+```
+
+
+
+
+
+
+```{r}
+
+student_data_filtered <- student_data_filtered |>
+  rowwise() |>
+  mutate(
+    Q10_comp = ifelse(
+      all(is.na(c_across(Q10_1:Q10_5))),
+      NA_real_,
+      mean(c_across(Q10_1:Q10_5), na.rm = TRUE)
+    )
+  ) |> ungroup()
+
+head(student_data_filtered)
+
+
+```
+
+
+
+
+
+
+
+# Awareness of limitations Score Q18
+
+
+## Q18 - To what extent are you aware of the following limitations of using AI for data science tasks?
+
+
+## RECODING
+
+
+```{r Awareness of limitations Score Q18}
+
+# Recoding to numeric
+
+student_data_filtered <- student_data_filtered |>
+  mutate(Q18_1 =
+           recode(Q18_1,
+                  "Not at All Aware" = 1,
+                  "Not Very Aware" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Aware" = 4,
+                  "Very Aware" = 5),
+        Q18_2 = 
+              recode(Q18_2,
+                  "Not at All Aware" = 1,
+                  "Not Very Aware" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Aware" = 4,
+                  "Very Aware" = 5),
+        Q18_3 =
+         recode(Q18_3,
+                  "Not at All Aware" = 1,
+                  "Not Very Aware" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Aware" = 4,
+                  "Very Aware" = 5),
+         Q18_4 = 
+         recode(Q18_4,
+                  "Not at All Aware" = 1,
+                  "Not Very Aware" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Aware" = 4,
+                  "Very Aware" = 5),
+        Q18_5 =
+         recode(Q18_5,
+                  "Not at All Aware" = 1,
+                  "Not Very Aware" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Aware" = 4,
+                  "Very Aware" = 5))
+
+
+
+student_data_filtered <- student_data_filtered |>
+  mutate(Q15_1 =
+           recode(Q15_1,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+        Q15_2 = 
+          recode(Q15_2,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+              
+        Q15_3 =
+         recode(Q15_3,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+         Q15_4 =    # reverse coding
+         recode(Q15_4,
+                  "Strongly Disagree" = 5,
+                  "Disagree" = 4,
+                  "Neutral" = 3,
+                  "Agree" = 2,
+                  "Strongly Agree" = 1))
+
+
+
+head(student_data_filtered)
+
+
+
+```
+
+
+
+```{r}
+
+student_data_filtered <- student_data_filtered |>
+  rowwise() |>
+  mutate(
+    Q18_comp = ifelse(
+      all(is.na(c_across(c(Q18_1:Q18_5)))),
+      NA_real_,
+      mean(c_across(c(Q18_1:Q18_5)), na.rm = TRUE)
+    )
+  ) |>
+  ungroup()
+
+head(student_data_filtered)
+
+
+```
+
+
+
+## summary 
+
+```{r}
+
+Q18_Sum <- student_data_filtered |>
+  summarise(n = sum(!is.na(Q18_comp)),
+            Min = min(Q18_comp, na.rm = TRUE),
+            Mean = mean(Q18_comp, na.rm = TRUE),
+            SD = sd(Q18_comp, na.rm =TRUE),
+            Max = max(Q18_comp, na.rm = TRUE))
+
+print(Q18_Sum)
+
+```
+
+
+
+
+## SUMMARY BY GENDER AND CLASS
+
+
+```{r Awareness of Limitations by Gender & Class level}
+
+# by gender
+
+Q18_bygender <- student_data_filtered |> 
+  group_by(Q3) |>
+   filter(!is.na(class_group), !is.na(Q3)) |>
+  summarise(n = sum(!is.na(Q18_comp)),
+            Mean = mean(Q18_comp, na.rm = TRUE),
+            SD = sd(Q18_comp, na.rm =TRUE)) 
+
+print(Q18_bygender)
+
+
+
+
+# by class
+
+Q18_class <- student_data_filtered |> 
+  group_by(class_group) |>
+  filter(!is.na(class_group)) |>
+  summarise(n = sum(!is.na(Q18_comp)),
+            Mean = mean(Q18_comp, na.rm = TRUE),
+            SD = sd(Q18_comp, na.rm =TRUE))
+
+print(Q18_class)
+
+
+```
+
+
+
+
+## BOXPLOT  FOR CLASS AND GENDER
+
+
+```{r, warning=FALSE,message=FALSE}
+
+student_data_filtered |>
+  ggplot(aes(x = Q3, y = Q18_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = FALSE) +
+  labs(
+    title = "Q18 Composite Score by Gender",
+    x = "Gender",
+    y = "Q18 Composite Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+
+
+student_data_filtered |>
+  ggplot(aes(x = class_group, y = Q18_comp )) +
+  geom_boxplot(width = 0.6, alpha = 0.8) +
+  labs(
+    title = "Q18 Composite Score by Class Group",
+    x = "Class Group",
+    y = "Q18 Composite Score"
+  )
+
+student_data_filtered |> filter(!is.na(class_group), !is.na(Q18_comp))|>
+ ggplot(aes(x = class_group, y = Q18_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = TRUE) +
+  labs(
+    title = "Awareness of Limitations Scores by Class & Gender",
+    x = "Class Group",
+    y = "Limitations Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    legend.position = "bottom"
+  )
+
+
+```
+
+# Perceptions Q12 AND Q21
+
+## Q12 - To what extent do you agree with the following statements regarding AI tools in data science? 
+
+## Q21 - Do you think AI tools can significantly enhance the following aspects of your data science workflow?  
+
+
+## RECODING
+
+
+
+```{r Perceptions Score}
+
+student_data_filtered <- student_data_filtered |>
+  mutate(Q12_1 =
+           recode(Q12_1,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+        Q12_2 = 
+          recode(Q12_2,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+              
+        Q12_3 =
+         recode(Q12_3,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+         Q12_4 =  # reverse coding
+         recode(Q12_4,
+                  "Strongly Disagree" = 5,
+                  "Disagree" = 4,
+                  "Neutral" = 3,
+                  "Agree" = 2,
+                  "Strongly Agree" = 1))
+
+
+
+
+student_data_filtered <- student_data_filtered |>
+  mutate(Q21_1 =
+           recode(Q21_1,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+        Q21_2 = 
+              recode(Q21_2,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+        Q21_3 =
+         recode(Q21_3,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+         Q21_4 = 
+         recode(Q21_4,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+
+        
+        Q21_5 =
+         recode(Q21_5,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5))
+
+head(student_data_filtered)
+
+```
+
+
+
+
+
+
+```{r}
+
+
+# compute the arithmetic mean across available selected items for each respondent; return NA only when all five
+# selected items are missing.
+student_data_filtered <- student_data_filtered |>
+  rowwise() |>
+  mutate(
+    Qper_comp = ifelse(
+      all(is.na(c_across(c(Q12_1:Q12_2, Q21_1:Q21_2,Q21_4)))),
+      NA_real_,
+      mean(c_across(c(Q12_1:Q12_2, Q21_1:Q21_2,Q21_4)), na.rm = TRUE)
+    )
+  ) |>
+  ungroup()
+
+head(student_data_filtered)
+
+
+
+
+```
+
+
+
+## Summary
+
+
+```{r}
+
+Qper_Sum <- student_data_filtered |>
+  summarise(n = sum(!is.na(Qper_comp)),
+            Min = min(Qper_comp, na.rm = TRUE),
+            Mean = mean(Qper_comp, na.rm = TRUE),
+            SD = sd(Qper_comp, na.rm =TRUE),
+            Max = max(Qper_comp, na.rm = TRUE))
+
+print(Qper_Sum)
+
+```
+
+
+
+## SUMMARY BY GENDER AND CLASS
+
+```{r Preception Scores by Gender & Class}
+
+# by gender
+
+Qper_bygender <- student_data_filtered |> 
+  group_by(Q3) |>
+   filter(!is.na(class_group), !is.na(Q3)) |>
+  summarise(n = sum(!is.na(Qper_comp)),
+            Mean = mean(Qper_comp, na.rm = TRUE),
+            SD = sd(Qper_comp, na.rm =TRUE)) 
+
+print(Qper_bygender)
+
+
+
+
+# by class
+
+Qper_class <- student_data_filtered |> 
+  group_by(class_group) |>
+  filter(!is.na(class_group)) |>
+  summarise(n = sum(!is.na(Qper_comp)),
+            Mean = mean(Qper_comp, na.rm = TRUE),
+            SD = sd(Qper_comp, na.rm =TRUE))
+
+print(Qper_class)
+
+
+```
+
+
+
+
+
+
+## BOXPLOT  FOR CLASS AND GENDER
+
+
+```{r, warning=FALSE, message=FALSE}
+
+student_data_filtered |>
+  ggplot(aes(x = Q3, y = Qper_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = FALSE) +
+  labs(
+    title = "Perception Composite Score by Gender",
+    x = "Gender",
+    y = "Perception Composite Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+
+
+student_data_filtered |>
+  ggplot(aes(x = class_group, y = Qper_comp )) +
+  geom_boxplot(width = 0.6, alpha = 0.8) +
+  labs(
+    title = "Perception Composite Score by Class Group",
+    x = "Class Group",
+    y = "Perception Score"
+  )
+
+student_data_filtered |> filter(!is.na(class_group), !is.na(Qper_comp))|>
+ ggplot(aes(x = class_group, y = Qper_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = TRUE) +
+  labs(
+    title = "Perception Composite Score by Class Group and Gender",
+    x = "Class Group",
+    y = "Perception Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    legend.position = "bottom"
+  )
+
+
+```
+
+
+
+# Overall Group Comparison Analyses
+
+## Independent Samples T-Tests for Gender Differences in Composite Scores
+
+
+```{r}
+library(infer)
+
+   #  Familiarity
+student_data_filtered |>
+  t_test(Q10_comp ~ Q3, order = c("Male", "Female") )
+
+  #   Awareness of limitations
+student_data_filtered |>
+  t_test(Q18_comp ~ Q3, order = c("Male", "Female") )
+
+
+  #   Perceptions
+student_data_filtered |>
+  t_test(Qper_comp ~ Q3, order = c("Male", "Female") )
+```
+
+## ANOVA and Tukey Multiple Comparisons for Class Group Differences in All Composite Scores
+
+
+```{r}
+   #  Familiarity
+ aov_10 <-  aov(Q10_comp ~ class_group, data = student_data_filtered)
+
+summary(aov_10)
+TukeyHSD(aov_10)
+
+  #   Awareness of limitations
+aov_lim <-   aov(Q18_comp ~ class_group, data = student_data_filtered  )
+summary(aov_lim)
+TukeyHSD(aov_lim)
+
+  #   Perceptions
+aov_per <-   aov(Qper_comp ~ class_group, data = student_data_filtered  )
+summary(aov_per)
+TukeyHSD(aov_per)
+
+```
+
+## T-Tests Comparing Graduate and Undergraduate Students on All Composite Scores
+
+
+```{r}
+student_data_filtered <- student_data_filtered |> mutate(class_group2 = ifelse(class_group == "Graduate" ,
+                                           "Graduate", "Undergraduate"))
+
+# familiarity
+
+student_data_filtered |>
+t_test(Q10_comp ~ class_group2, order = c("Graduate", "Undergraduate") )
+
+
+ # Awareness of Limitations
+
+student_data_filtered |>
+  t_test(Q18_comp ~ class_group2, order = c("Graduate", "Undergraduate") )
+
+# Perceptions
+
+student_data_filtered |>
+  t_test(Qper_comp ~ class_group2, order = c("Graduate", "Undergraduate") )
+```
+
+
+## Summary Statistics (n, Mean, SD) by Class Group2 (Graduate vs. Undergraduate)
+## Not included in the manuscript.
+
+```{r}
+  # familiarity
+
+Q10_byclass2 <- student_data_filtered |> 
+  group_by(class_group2) |>
+   filter(!is.na(class_group2)) |>
+  summarise(n= sum(!is.na(Q10_comp)),
+            Mean = mean(Q10_comp, na.rm = TRUE),
+            SD = sd(Q10_comp, na.rm =TRUE)) 
+
+print(Q10_byclass2)
+
+  # Awareness of Limitations
+
+Q18_byclass2 <- student_data_filtered |> 
+  group_by(class_group2) |>
+   filter(!is.na(class_group2)) |>
+  summarise(n = sum(!is.na(Q18_comp)),
+            Mean = mean(Q18_comp, na.rm = TRUE),
+            SD = sd(Q18_comp, na.rm =TRUE)) 
+
+print(Q18_byclass2)
+
+
+
+  # Perceptions
+
+Qper_byclass2 <- student_data_filtered |> 
+  group_by(class_group2) |>
+   filter(!is.na(class_group2)) |>
+  summarise(n = sum(!is.na(Qper_comp)),
+            Mean = mean(Qper_comp, na.rm = TRUE),
+            SD = sd(Qper_comp, na.rm =TRUE)) 
+
+print(Qper_byclass2)
+
+
+```
+
+
+## Confirmatory Factor Analysis (CFA)
+
+
+```{r}
+
+library(lavaan)
+
+Q10_model <- 'Q10_factor =~ Q10_1 + Q10_2 + Q10_3 + Q10_4 + Q10_5'
+
+Q10_CFA <- cfa(model = Q10_model, data = student_data_filtered)
+
+
+summary(Q10_CFA, fit.measures = TRUE, standardized = TRUE)
+
+
+
+
+```
+
+```{r}
+
+Alpha <- psych::alpha(
+  student_data_filtered |>
+    dplyr::select(Q10_1:Q10_5)
+)
+
+
+Alpha$total
+
+
+```
+
+
+
+
+```{r}
+
+fam_table  <- data.frame(
+  Ques_Type = ("Familiarity (Q10)"),
+  Chi_Square = fitMeasures(Q10_CFA, "chisq"),
+  df = fitMeasures(Q10_CFA,"df"),
+  P_value = fitMeasures(Q10_CFA, "pvalue"),
+  CFI = fitMeasures(Q10_CFA, "cfi"),
+  TLI = fitMeasures(Q10_CFA, "tli"),
+  RMSEA = fitMeasures(Q10_CFA, "rmsea"),
+  Raw_Alpha = Alpha$total$raw_alpha,
+  Std_Alpha = Alpha$total$std.alpha,
+  row.names = NULL
+)
+
+
+fam_table
+
+```
+
+
+## EFA AND CFA for Awareness of limitations Score Q18 and  Q15_4
+### Exploratory Factor Analysis 
+
+
+```{r}
+
+Q_awa <- student_data_filtered |> select(Q18_1:Q18_5) |>
+  na.omit()
+
+
+
+factanal(Q_awa, factors = 1)
+
+
+
+```
+
+
+## Confirmatory Factor Analysis (CFA)
+
+
+```{r}
+
+Q_awa_model <- '
+  Qawa_factor =~ Q18_1 + Q18_2 + Q18_3 + Q18_4 + Q18_5
+'
+
+Q_awa_cfa <- cfa(model = Q_awa_model, data = student_data_filtered)
+
+summary(Q_awa_cfa, fit.measures = TRUE, standardized = TRUE)
+
+
+```
+
+
+```{r}
+
+Alpha1 <- psych::alpha(
+  student_data_filtered |>
+    dplyr::select(Q18_1:Q18_5)
+)
+
+
+Alpha1$total
+```
+
+
+
+
+```{r}
+awa_table  <- data.frame(
+  Ques_Type = ("Awar of lim (Q18)"),
+  Chi_Square = fitMeasures(Q_awa_cfa, "chisq"),
+  df = fitMeasures(Q_awa_cfa,"df"),
+  P_value = fitMeasures(Q_awa_cfa, "pvalue"),
+  CFI = fitMeasures(Q_awa_cfa, "cfi"),
+  TLI = fitMeasures(Q_awa_cfa, "tli"),
+  RMSEA = fitMeasures(Q_awa_cfa, "rmsea"),
+  Raw_Alpha = Alpha1$total$raw_alpha,
+  Std_Alpha = Alpha1$total$std.alpha,
+  row.names = NULL
+)
+
+
+awa_table
+```
+
+
+
+## EFA AND CFA for Perceptions Q12 AND Q21
+### Exploratory Factor Analysis 
+
+
+
+```{r Perceptions}
+
+Q_per <- student_data_filtered |> select(Q12_1:Q12_2, Q21_1:Q21_2,Q21_4) |>
+  na.omit()
+
+
+
+factanal(Q_per,factors = 1)
+
+
+```
+
+## Confirmatory Factor Analysis (CFA)
+
+
+```{r}
+
+Q_per_model <- '
+  Q12_factor =~ Q12_1 + Q12_2 + Q21_1 + Q21_2 + Q21_4 
+'
+
+Q_per_cfa <- cfa(model = Q_per_model, data = student_data_filtered)
+
+summary(Q_per_cfa, fit.measures = TRUE, standardized = TRUE)
+
+
+
+```
+
+
+
+```{r}
+
+Alpha2 <- psych::alpha(
+  student_data_filtered |>
+    dplyr::select(Q12_1:Q12_2, Q21_1:Q21_2,Q21_4)
+)
+
+Alpha2$total
+
+```
+
+
+
+
+
+## Table of 
+
+```{r}
+
+per_table  <- data.frame(
+  Ques_Type = ("Perception (Q12,Q21)"),
+  Chi_Square = fitMeasures(Q_per_cfa, "chisq"),
+  df = fitMeasures(Q_per_cfa,"df"),
+  P_value = fitMeasures(Q_per_cfa, "pvalue"),
+  CFI = fitMeasures(Q_per_cfa, "cfi"),
+  TLI = fitMeasures(Q_per_cfa, "tli"),
+  RMSEA = fitMeasures(Q_per_cfa, "rmsea"),
+  Raw_Alpha = Alpha2$total$raw_alpha,
+  Std_Alpha = Alpha2$total$std.alpha,
+  row.names = NULL
+)
+
+
+per_table
+
+
+```
+
+
+## Confirmatory Factor Analysis Results
+
+```{r}
+
+Summary_Table <- bind_rows(fam_table,per_table, awa_table)
+
+Summary_Table 
+
+```
+
+
+
+
+
+## Subgroup Analysis
+
+
+## SUMMARY BY GENDER AND CLASS
+
+
+```{r Familiarity By Gender}
+# by gender
+# IMPORTANT: We restricted the working dataset to Female/Male at this point to create the student_data_MF subset for gender analysis, this exculdes students who declined to specify their gender or identified as non-banary.  
+
+student_data_filtered <- student_data_filtered %>%
+  filter(Q3 %in% c("Female", "Male"))
+
+Q10_bygender <- student_data_filtered |> 
+  group_by(Q3) |>
+   filter(!is.na(class_group)) |>
+  summarise(n= sum(!is.na(Q10_comp)),
+            Mean = mean(Q10_comp, na.rm = TRUE),
+            SD = sd(Q10_comp, na.rm =TRUE)) 
+
+print(Q10_bygender)
+
+
+# by class
+
+Q10_class <- student_data_filtered |> 
+  group_by(class_group) |>
+  filter(!is.na(class_group)) |>
+  summarise(n= sum(!is.na(Q10_comp)),
+            Mean = mean(Q10_comp, na.rm = TRUE),
+            SD = sd(Q10_comp, na.rm =TRUE))
+
+print(Q10_class)
+
+
+```
+
+
+
+
+## BOXPLOT  FOR CLASS AND GENDER
+
+
+```{r, warning=FALSE, message=FALSE}
+
+student_data_filtered |>
+  ggplot(aes(x = Q3, y = Q10_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = FALSE) +
+  labs(
+    title = "Q10 Composite Score by Gender",
+    x = "Gender",
+    y = "Q10 Composite Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+
+
+student_data_filtered |>
+  ggplot(aes(x = class_group, y = Q10_comp )) +
+  geom_boxplot(width = 0.6, alpha = 0.8) +
+  labs(
+    title = "Q10 Composite Score by Class Group",
+    x = "Class Group",
+    y = "Q10 Composite Score"
+  )
+
+student_data_filtered |> filter(!is.na(class_group), !is.na(Q10_comp))|>
+ ggplot(aes(x = class_group, y = Q10_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = TRUE) +
+  labs(
+    title = "Familiariy Composite Score by Class and Gender",
+    x = "Class Group",
+    y = "Familiariy Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    legend.position = "bottom"
+  )
+
+
+```
+
+## SUMMARY
+
+
+```{r Familirity (Q10) Summary}
+
+Q10_Sum <- student_data_filtered |>
+  summarise(n = sum(!is.na(Q10_comp)),
+            Min = min(Q10_comp, na.rm = TRUE),
+            Mean = mean(Q10_comp, na.rm = TRUE),
+            SD = sd(Q10_comp, na.rm =TRUE),
+            Max = max(Q10_comp, na.rm = TRUE))
+
+print(Q10_Sum)
+
+
+
+
+```

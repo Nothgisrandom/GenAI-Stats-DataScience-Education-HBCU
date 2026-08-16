@@ -1,0 +1,2542 @@
+
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Reproducible analysis of the faculty AI for data science survey
+
+
+```{r setup-faculty-analysis, warning=FALSE, message=FALSE}
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  dplyr, stringr, ggplot2, knitr, scales, janitor, forcats, tidyr,
+  readxl, tibble, purrr
+)
+
+# Create output directory for saved figures
+if (!dir.exists("figures_all")) dir.create("figures_all", recursive = TRUE)
+
+# Helper to locate the faculty survey workbook inside the repository
+find_faculty_file <- function() {
+  candidates <- c("AI4D_FacultySurvey_August_8_2025.xlsx",
+                  file.path("data","AI4D_FacultySurvey_August_8_2025.xlsx")
+  )
+  found <- candidates[file.exists(candidates)]
+  if (length(found) == 0) {
+    stop(
+      "Faculty survey Excel file not found in the working directory. ",
+      "Place the workbook in the repo root or update `find_faculty_file()`."
+    )
+  }
+  found[[1]]
+}
+```
+
+```{r import-faculty-data, warning=FALSE, message=FALSE}
+# Read the workbook using repo-relative paths only
+faculty_data_path <- find_faculty_file()
+
+# ---- 1) Read the first two rows (Qualtrics short & long headers) ----
+hdr <- readxl::read_excel(faculty_data_path, n_max = 2, col_names = FALSE)
+
+r1 <- as.character(unlist(hdr[1, ], use.names = FALSE))
+r2 <- as.character(unlist(hdr[2, ], use.names = FALSE))
+
+# Heuristic to pick which row is the short (system) header
+score_row <- function(x) {
+  keys <- c("StartDate","EndDate","ResponseId","Progress","Duration (in seconds)")
+  sum(keys %in% x) + sum(stringr::str_detect(x, "^Q\\d"))
+}
+short_raw <- if (score_row(r1) >= score_row(r2)) r1 else r2
+long_raw  <- if (identical(short_raw, r1)) r2 else r1
+
+# Ensure consistent length, clean short names for valid R columns
+n_cols <- max(length(short_raw), length(long_raw))
+short_clean <- janitor::make_clean_names(short_raw[seq_len(n_cols)])
+long_clean  <- long_raw[seq_len(n_cols)]
+
+# Map short -> long labels for nice printing later
+label_map <- setNames(long_clean, short_clean)
+
+# ---- 2) Read full data using the short names; data begin on row 3 ----
+faculty_data <- readxl::read_excel(
+  faculty_data_path,
+  sheet = 1,
+  skip = 2,
+  col_names = short_clean,
+  guess_max = 10000
+) |>
+  janitor::remove_empty("rows") |>
+  janitor::remove_empty("cols")
+
+attr(faculty_data, "label_map") <- label_map
+
+# ---- 3) Optional quality filters ----
+faculty_data <- faculty_data |>
+  dplyr::mutate(
+    duration_in_seconds = suppressWarnings(as.numeric(duration_in_seconds)),
+    progress            = suppressWarnings(as.numeric(progress))
+  )
+
+if (all(c("duration_in_seconds","progress") %in% names(faculty_data))) {
+  faculty_data <- faculty_data |>
+    dplyr::filter(duration_in_seconds >= 180, progress >= 25)
+}
+
+cat("Rows after quality filters:", nrow(faculty_data), "
+Columns:", ncol(faculty_data), "
+")
+dplyr::glimpse(faculty_data)
+
+survey_palette_red_teal <- c("#117A65", "#48C9B0", "#F1C40F", "#E67E22", "#8B0000")
+```
+
+
+## Q2: Consent to Participate in the Study
+
+```{r, warning=FALSE, message=FALSE}
+
+# ---- Locate Q2 column (handles 'Q2' or 'q2') ----
+q2_col <- dplyr::case_when(
+  "Q2" %in% names(faculty_data) ~ "Q2",
+  "q2" %in% names(faculty_data) ~ "q2",
+  TRUE ~ NA_character_
+)
+stopifnot(!is.na(q2_col))
+
+# ---- Standardize Q2 to two levels; handle text or numeric exports ----
+faculty_data <- faculty_data %>%
+  mutate(
+    q2_raw = .data[[q2_col]],
+    q2_std = case_when(
+      is.numeric(q2_raw) & q2_raw == 1 ~ "Consented",
+      is.numeric(q2_raw) & q2_raw == 2 ~ "Did Not Consent",
+      str_detect(q2_raw, regex("^i\\s*voluntar|consent to participate",
+                               ignore_case = TRUE)) ~ "Consented",
+      str_detect(q2_raw, regex("don.?t\\s*consent|do not consent|decline",
+                               ignore_case = TRUE)) ~ "Did Not Consent",
+      TRUE ~ NA_character_
+    ) |> factor(levels = c("Consented", "Did Not Consent"))
+  )
+
+# ---- Summary table ----
+q2_tab <- faculty_data %>%
+  filter(!is.na(q2_std)) %>%
+  count(q2_std, name = "Count") %>%
+  mutate(Percent = round(100 * Count / sum(Count), 1))
+
+knitr::kable(q2_tab, caption = "Q2: Consent Summary")
+
+# ---- Plots (keep SAME color as student survey: steelblue) ----
+ggplot(q2_tab, aes(x = q2_std, y = Percent)) +
+  geom_col(fill = "#48C9B0") +
+  scale_y_continuous(labels = percent_format(scale = 1)) +
+  labs(title = "Q2: Consent (Percent)", x = NULL, y = "Percent") +
+  theme_minimal()
+
+# ---- Create consented-only dataset for downstream questions ----
+faculty_data_consented <- faculty_data %>% filter(q2_std == "Consented")
+cat("Consented N:", nrow(faculty_data_consented), "of", nrow(faculty_data), "total\n")
+
+
+```
+
+
+## Saving custom theme for future use
+```{r}
+# --- Define once at the top of your script or in a separate R file ---
+theme_publication <- function(base_size = 10) {
+  theme_classic(base_size = base_size) +
+    theme(
+      plot.title      = element_text(face = "bold", size = 11, hjust = 0.5),
+      plot.subtitle   = element_text(size = 10, hjust = 0.5, color = "gray25"),
+      axis.text.x     = element_text(face = "bold", size = 10),
+      axis.text.y     = element_text(face = "bold", size = 10, lineheight = 1.1),
+      axis.title.x    = element_text(face = "bold", size = 10),
+      axis.title.y    = element_text(face = "bold", size = 10),
+      panel.grid.major.x = element_line(color = "gray90"),
+      panel.grid.minor = element_blank(),
+      legend.title    = element_text(face = "bold"),
+      legend.text     = element_text(size = 8),
+      legend.position = "bottom",
+      legend.key.size = grid::unit(0.35, "cm"),
+      legend.margin   = margin(t = 2, b = 5),
+      legend.box.margin = margin(5, 5, 10, 5),
+      legend.box = "vertical",
+      plot.caption    = element_text(size = 9, hjust = 0, color = "gray30"),
+      plot.margin     = margin(10, 15, 45, 15)
+    )
+}
+
+###
+load_publication_style <- function() {
+  # Color palette
+  assign("familiarity_palette", c(
+    "Not at All Familiar" = "#B2182B",
+    "Not Very Familiar"   = "#E67E22",
+    "Neutral"             = "#F1C40F",
+    "Somewhat Familiar"   = "#48C9B0",
+    "Very Familiar"       = "#117A65"
+  ), envir = .GlobalEnv)
+
+  # Theme
+  theme_set(theme_publication())
+}
+
+load_publication_style()
+
+
+```
+
+
+## Q3: Gender-summary
+
+```{r, warning=FALSE, message=FALSE}
+
+# Use consented data if it exists; otherwise fall back to full
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+# Locate Q3 column robustly
+q3_col <- dplyr::case_when(
+  "Q3" %in% names(faculty_analysis_data) ~ "Q3",
+  "q3" %in% names(faculty_analysis_data) ~ "q3",
+  TRUE ~ NA_character_
+)
+stopifnot(!is.na(q3_col))
+
+# Standardize Q3 values (handles numeric-coded or text exports)
+faculty_analysis_data <- faculty_analysis_data %>%
+  mutate(
+    q3_raw = .data[[q3_col]],
+    q3_std = case_when(
+      is.numeric(q3_raw) & q3_raw == 1 ~ "Male",
+      is.numeric(q3_raw) & q3_raw == 2 ~ "Female",
+      is.numeric(q3_raw) & q3_raw == 3 ~ "Prefer not to say",
+      str_detect(q3_raw, regex("^male$", ignore_case = TRUE)) ~ "Male",
+      str_detect(q3_raw, regex("^female$", ignore_case = TRUE)) ~ "Female",
+      str_detect(q3_raw, regex("prefer\\s*not\\s*to\\s*say",
+                               ignore_case = TRUE)) ~ "Prefer not to say",
+      TRUE ~ NA_character_
+    ) |> factor(levels = c("Male","Female","Prefer not to say"))
+  )
+
+# Summary table
+q3_tab <- faculty_analysis_data %>%
+  filter(!is.na(q3_std)) %>%
+  count(q3_std, name = "Count") %>%
+  mutate(Percent = round(100 * Count / sum(Count), 1))
+
+knitr::kable(q3_tab, caption = "Q3: Gender — Summary")
+
+# Plots
+ggplot(q3_tab, aes(x = q3_std, y = Percent)) +
+  geom_col(fill = "#48C9B0") +
+  scale_y_continuous(labels = percent_format(scale = 1)) +
+  labs(title = "Q3: Gender — Percent", x = NULL, y = "Percent") +
+  theme_minimal()
+
+```
+
+
+## Q4: What is your primary area of expertise within data science? (e.g., Intro Statistics, Mathematical Statistics, Data Science, Machine Learning, etc.)
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+q4_col <- dplyr::case_when(
+  "Q4" %in% names(faculty_analysis_data) ~ "Q4",
+  "q4" %in% names(faculty_analysis_data) ~ "q4",
+  TRUE ~ NA_character_
+)
+stopifnot(!is.na(q4_col))
+
+# ---- Clean & map free text into canonical categories ----
+# We keep the FIRST matching category as the "primary" area.
+canon <- faculty_analysis_data %>%
+  transmute(
+    q4_raw  = as.character(.data[[q4_col]]),
+    q4_norm = str_squish(str_to_lower(q4_raw)),
+    area = case_when(
+      str_detect(q4_norm, "intro.*stat|^intro\\b")                              ~ "Introductory Statistics",
+      str_detect(q4_norm, "mathematical stat|theoretical stat|probability(?!.*appl)") ~ "Mathematical Statistics / Probability",
+      str_detect(q4_norm, "\\bdata science\\b|\\bds\\b")                        ~ "Data Science",
+      str_detect(q4_norm, "machine learning|\\bml\\b")                          ~ "Machine Learning",
+      str_detect(q4_norm, "deep learning|\\bdl\\b")                              ~ "Deep Learning",
+      str_detect(q4_norm, "biostat")                                            ~ "Biostatistics",
+      str_detect(q4_norm, "applied stat")                                       ~ "Applied Statistics",
+      str_detect(q4_norm, "econometric|business analytics|analytics\\b")        ~ "Business Analytics / Econometrics",
+      str_detect(q4_norm, "visualiz|viz")                                       ~ "Data Visualization",
+      str_detect(q4_norm, "computer science|\\bcs\\b|software")                 ~ "Computer Science / Software",
+      str_detect(q4_norm, "programming|python|\\br\\b|java|matlab|c\\+\\+")     ~ "Programming / Tools",
+      str_detect(q4_norm, "database|data engineer|etl|pipeline")                ~ "Data Engineering / Databases",
+      str_detect(q4_norm, "big data|spark|hadoop|aws|azure|gcp|cloud")          ~ "Big Data / Cloud",
+      str_detect(q4_norm, "nlp|natural language")                                ~ "Natural Language Processing",
+      str_detect(q4_norm, "optimiza|operations research|\\bor\\b")              ~ "Optimization / Operations Research",
+      str_detect(q4_norm, "statistic")                                          ~ "Statistics (General)",
+      str_length(q4_norm) > 0                                                   ~ "Other / Unspecified",
+      TRUE                                                                      ~ NA_character_
+    )
+  )
+
+# ---- Summary table ----
+q4_tab <- canon %>%
+  filter(!is.na(area)) %>%
+  count(area, name = "Count") %>%
+  arrange(desc(Count)) %>%
+  mutate(Percent = round(100 * Count / sum(Count), 1))
+
+knitr::kable(q4_tab, caption = "Q4: Primary Area of Expertise — Summary")
+
+# ---- Plots (steelblue; flip for readability) ----
+# Wrap long labels
+q4_tab <- q4_tab %>% mutate(area_lab = stringr::str_wrap(area, width = 28))
+
+p_q4<-ggplot(q4_tab, aes(x = fct_reorder(area_lab, Count), y = Count)) +
+  geom_col(fill = "#48C9B0") +
+  coord_flip() +
+  labs(title = "Q4: Primary Area of Expertise", x = NULL, y = "Count") +
+  theme_minimal()
+
+ggsave(
+  filename = "Faculty_figures/Q4_Primary Area of Expertise.png",
+  plot = p_q4,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+```
+
+## Q5: How many years have you been teaching data science or related subjects?
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+q5_col <- dplyr::case_when(
+  "Q5" %in% names(faculty_analysis_data) ~ "Q5",
+  "q5" %in% names(faculty_analysis_data) ~ "q5",
+  TRUE ~ NA_character_
+)
+stopifnot(!is.na(q5_col))
+
+# Map numeric or text to canonical labels
+q5_raw <- faculty_analysis_data[[q5_col]]
+q5_num <- suppressWarnings(as.numeric(q5_raw))
+levels_q5 <- c("1–3 years","3–5 years","5–10 years","10+ years")
+
+faculty_analysis_data <- faculty_analysis_data %>%
+  mutate(
+    q5_std = case_when(
+      !is.na(q5_num) & q5_num == 1 ~ "1–3 years",
+      !is.na(q5_num) & q5_num == 2 ~ "3–5 years",
+      !is.na(q5_num) & q5_num == 3 ~ "5–10 years",
+      !is.na(q5_num) & q5_num == 4 ~ "10+ years",
+      str_detect(as.character(q5_raw), regex("^1\\s*[-–]\\s*3",
+                                             ignore_case = TRUE)) ~ "1–3 years",
+      str_detect(as.character(q5_raw), regex("^3\\s*[-–]\\s*5",
+                                             ignore_case = TRUE)) ~ "3–5 years",
+      str_detect(as.character(q5_raw), regex("^5\\s*[-–]\\s*10",
+                                             ignore_case = TRUE)) ~ "5–10 years",
+      str_detect(as.character(q5_raw), regex("^10\\+|10\\s*\\+|10\\s*\\+\\s*years?",
+                                             ignore_case = TRUE)) ~ "10+ years",
+      TRUE ~ NA_character_
+    ) |> factor(levels = levels_q5)
+  )
+
+# Summary table
+q5_tab <- faculty_analysis_data %>%
+  filter(!is.na(q5_std)) %>%
+  count(q5_std, name = "Count") %>%
+  mutate(Percent = round(100 * Count / sum(Count), 1))
+
+knitr::kable(q5_tab, caption = "Q5: Years Teaching DS or Related Subjects — Summary")
+
+# Bar charts (counts & percent)
+ggplot(q5_tab, aes(x = q5_std, y = Count)) +
+  geom_col(fill = "#48C9B0") +
+  labs(title = "Q5: Years Teaching DS or Related Subjects", x = NULL, y = "Count") +
+  theme_minimal()
+
+```
+
+
+## Q6: At what academic level do you primarily teach?
+
+```{r, warning=FALSE, message=FALSE}
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+q6_col <- dplyr::case_when(
+  "Q6" %in% names(faculty_analysis_data) ~ "Q6",
+  "q6" %in% names(faculty_analysis_data) ~ "q6",
+  TRUE ~ NA_character_
+)
+stopifnot(!is.na(q6_col))
+
+# Map numeric or text to canonical labels
+q6_raw <- faculty_analysis_data[[q6_col]]
+q6_num <- suppressWarnings(as.numeric(q6_raw))
+levels_q6 <- c("Undergraduate","Graduate","Both")
+
+faculty_analysis_data <- faculty_analysis_data %>%
+  mutate(
+    q6_std = case_when(
+      !is.na(q6_num) & q6_num == 1 ~ "Undergraduate",
+      !is.na(q6_num) & q6_num == 2 ~ "Graduate",
+      !is.na(q6_num) & q6_num == 3 ~ "Both",
+      str_detect(as.character(q6_raw), regex("^undergrad|^undergraduate",
+                                             ignore_case = TRUE)) ~ "Undergraduate",
+      str_detect(as.character(q6_raw), regex("^grad|^graduate$", ignore_case = TRUE)) &
+        !str_detect(as.character(q6_raw), regex("undergrad|both", ignore_case = TRUE)) ~ "Graduate",
+      str_detect(as.character(q6_raw), regex("\\bboth\\b|ug\\s*&?\\s*grad|undergrad.*grad|undergraduate.*graduate",
+                                             ignore_case = TRUE)) ~ "Both",
+      TRUE ~ NA_character_
+    ) |> factor(levels = levels_q6)
+  )
+
+# Summary table
+q6_tab <- faculty_analysis_data %>%
+  filter(!is.na(q6_std)) %>%
+  count(q6_std, name = "Count") %>%
+  mutate(Percent = round(100 * Count / sum(Count), 1))
+
+knitr::kable(q6_tab, caption = "Q6: Primary Teaching Level — Summary")
+
+# Plots (steelblue to match student survey)
+ggplot(q6_tab, aes(x = q6_std, y = Count)) +
+  geom_col(fill = "#48C9B0") +
+  labs(title = "Q6: Primary Teaching Level", x = NULL, y = "Count") +
+  theme_minimal()
+
+
+```
+
+## Q7: Have you incorporated AI tools in your data science teaching?
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+q7_col <- dplyr::case_when(
+  "Q7" %in% names(faculty_analysis_data) ~ "Q7",
+  "q7" %in% names(faculty_analysis_data) ~ "q7",
+  TRUE ~ NA_character_
+)
+stopifnot(!is.na(q7_col))
+
+# Map numeric or text to canonical labels
+q7_raw <- faculty_analysis_data[[q7_col]]
+q7_num <- suppressWarnings(as.numeric(q7_raw))
+levels_q7 <- c("Never","Rarely","Sometimes","Often","Always")
+
+faculty_analysis_data <- faculty_analysis_data %>%
+  mutate(
+    q7_std = case_when(
+      !is.na(q7_num) & q7_num == 1 ~ "Never",
+      !is.na(q7_num) & q7_num == 2 ~ "Rarely",
+      !is.na(q7_num) & q7_num == 3 ~ "Sometimes",
+      !is.na(q7_num) & q7_num == 4 ~ "Often",
+      !is.na(q7_num) & q7_num == 5 ~ "Always",
+      str_detect(as.character(q7_raw), regex("^never$", ignore_case = TRUE)) ~ "Never",
+      str_detect(as.character(q7_raw), regex("^rarely$", ignore_case = TRUE)) ~ "Rarely",
+      str_detect(as.character(q7_raw), regex("^sometimes?$", ignore_case = TRUE)) ~ "Sometimes",
+      str_detect(as.character(q7_raw), regex("^often$", ignore_case = TRUE)) ~ "Often",
+      str_detect(as.character(q7_raw), regex("^always$", ignore_case = TRUE)) ~ "Always",
+      TRUE ~ NA_character_
+    ) |> factor(levels = levels_q7)
+  )
+
+
+```
+
+
+## Q7 counts and percents
+```{r Q7}
+# ---- 1) Summarize counts & percentages ----
+q7_tab <- faculty_analysis_data %>%
+  filter(!is.na(q7_std) & q7_std != "") %>%       # valid (non-empty) responses
+  count(q7_std, name = "Count") %>%
+  mutate(
+    Percent = Count / sum(Count),
+    Label = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  )
+
+n_valid <- sum(q7_tab$Count)  # total valid responses
+
+# ---- 2) Horizontal bar chart (publication style) ----
+p_q7 <- ggplot(q7_tab, aes(
+  y = fct_reorder(q7_std, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline labels showing counts and percents
+  geom_text(
+    aes(label = Label),
+    hjust = -0.1, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(q7_tab$Percent) + 0.1),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles & captions
+  labs(
+    title = "Q7: Incorporated AI Tools in Teaching",
+    subtitle = "Percentages based on valid (non-missing) faculty responses",
+    x = "Percentage of Faculty",
+    y = "Response",
+    caption = paste0(
+      "n = ", n_valid,
+      " faculty respondents. (Percentages calculated from valid responses.)"
+    )
+  ) +
+
+  # Publication-style theme (matching Q22)
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    plot.caption = element_text(size = 9),
+    plot.margin = margin(10, 25, 25, 15)
+  )
+
+# ---- 3) Save high-resolution figure ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q7_Used_AI_horizontal_pub.png",
+  plot = p_q7,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+# ---- 4) Display plot and summary table ----
+print(p_q7)
+knitr::kable(q7_tab, caption = paste0("Q7: Incorporated AI Tools in Teaching (n = ", n_valid, ")"))
+```
+
+
+## Q8: What AI tools or platforms do you use in your teaching?
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+# ---- Canonical labels in the instrument order ----
+opt_map <- c(
+  "1"="AI coding platforms \n(Jupyter/Colab)",
+  "2"="Automated grading",
+  "3"="AI learning assistants \n(ChatGPT)",
+  "4"="AI data analysis/ vizualizations \n(DataRobot/Tableau)",
+  "5"="AI project management/ \ncollaboration",
+  "6"="Other",
+  "7"="None"
+)
+canon_levels <- unname(opt_map)
+
+# ---- Detect export style ----
+nm <- names(faculty_analysis_data)
+q8_single <- nm[tolower(nm) == "q8"]
+q8_wide   <- nm[str_detect(tolower(nm), "^q8(\\.|_|\\s|\\[|:)|^q8\\d")]
+q8_wide   <- setdiff(q8_wide, nm[str_detect(tolower(nm), "text|comment")])
+
+faculty_analysis_data$row_id <- seq_len(nrow(faculty_analysis_data))
+
+if (length(q8_single) == 1 && length(q8_wide) == 0) {
+  # ---- Case A: single comma/semicolon-separated column ----
+  long <- faculty_analysis_data %>%
+    select(row_id, q8 = all_of(q8_single)) %>%
+    filter(!is.na(q8), q8 != "") %>%
+    mutate(q8 = str_split(q8, "[,;]")) %>%
+    unnest(q8) %>%
+    mutate(q8 = str_squish(q8),
+           option = case_when(
+             str_detect(q8, regex("coding|jupyter|colab",  TRUE)) ~ opt_map["1"],
+             str_detect(q8, regex("grading",                TRUE)) ~ opt_map["2"],
+             str_detect(q8, regex("assistant|chatgpt",      TRUE)) ~ opt_map["3"],
+             str_detect(q8, regex("analysis|visual|datarobot|tableau", TRUE)) ~ opt_map["4"],
+             str_detect(q8, regex("project|collab",         TRUE)) ~ opt_map["5"],
+             str_detect(q8, regex("^none$",                 TRUE)) ~ opt_map["7"],
+             str_detect(q8, regex("other|specify",          TRUE)) ~ opt_map["6"],
+             TRUE ~ NA_character_
+           )) %>%
+    filter(!is.na(option))
+} else if (length(q8_wide) >= 1) {
+  # ---- Case B: multiple columns Q8_1..Q8_7 (or labeled variants) ----
+  long <- faculty_analysis_data %>%
+    select(row_id, all_of(q8_wide)) %>%
+    pivot_longer(-row_id, names_to = "col", values_to = "val") %>%
+    filter(!(is.na(val) | val %in% c("", "0", "Not Selected", "FALSE", "False"))) %>%
+    mutate(
+      idx = str_extract(col, "\\d+"),
+      option = unname(opt_map[idx]),
+      option = coalesce(option, case_when(
+        str_detect(col, regex("coding|jupyter|colab",  TRUE)) ~ opt_map["1"],
+        str_detect(col, regex("grading",                TRUE)) ~ opt_map["2"],
+        str_detect(col, regex("assistant|chatgpt",      TRUE)) ~ opt_map["3"],
+        str_detect(col, regex("analysis|visual|datarobot|tableau", TRUE)) ~ opt_map["4"],
+        str_detect(col, regex("project|collab",         TRUE)) ~ opt_map["5"],
+        str_detect(col, regex("\\bnone\\b",             TRUE)) ~ opt_map["7"],
+        str_detect(col, regex("other|specify",          TRUE)) ~ opt_map["6"],
+        TRUE ~ NA_character_
+      ))
+    ) %>%
+    filter(!is.na(option))
+} else {
+  stop("Q8 columns not found in this export.")
+}
+
+# ---- Enforce 'None' exclusivity ----
+long <- long %>%
+  group_by(row_id) %>% mutate(has_other = any(option != "None")) %>%
+  ungroup() %>% filter(!(option == "None" & has_other)) %>%
+  select(-has_other)
+
+
+```
+
+
+## Q8 plot
+```{r}
+# ---- 1) Summarize counts and percentages ----
+
+n_valid <- 14  # total number of valid (non-empty) responses
+q8_tab <- long %>%
+  count(option, name = "Count") %>%
+  complete(option = canon_levels, fill = list(Count = 0)) %>%
+  mutate(
+    option = factor(option, levels = canon_levels),
+    Percent = Count / n_valid,
+    Label = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  )
+
+# ---- 2) Wrap long labels for readability ----
+opt_wrapped <- stringr::str_wrap(canon_levels, width = 32)
+plot_data <- q8_tab %>%
+  mutate(option_w = factor(stringr::str_wrap(as.character(option), 32),
+                           levels = rev(opt_wrapped)))
+
+# ---- 3) Horizontal bar chart (publication style) ----
+p_q8F <- ggplot(plot_data, aes(
+  y = fct_reorder(option_w, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline labels showing counts + percents
+  geom_text(
+    aes(label = Label),
+    hjust = -0.1, fontface = "bold", size = 3.4, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_data$Percent) + 0.15),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles & caption (consistent with Q22 format)
+  labs(
+    title = "Q8: AI Tools/ Platforms Used in Teaching",
+    subtitle = "Multiple selections allowed; percentages based on valid faculty responses",
+    x = "Percentage of Faculty",
+    y = "AI Tool/ Platform",
+    caption = paste0(
+      "n = ", n_valid
+    )
+  ) +
+
+  # Unified publication-style theme (same as Q22)
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.0, lineheight = 1.1),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    plot.caption = element_text(size = 9),
+    plot.margin = margin(10, 65, 35, 15)
+  )
+
+# ---- 4) Save high-resolution plot ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q8_AI_Tools_Used_Teaching_horizontal_pub.png",
+  plot = p_q8F,
+  dpi = 600,
+  width = 8.9,
+  height = 5.5,
+  units = "in"
+)
+
+# ---- 5) Display plot and summary table ----
+print(p_q8F)
+knitr::kable(q8_tab, caption = paste0("Q8: AI Tools/ Platforms Used in Teaching (n = ", n_valid, ")"))
+```
+
+## Q9: How would you rate your ability to perform the following tasks using AI tools in your teaching?
+
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+q9_cols <- names(faculty_analysis_data)[grepl("^q9[_. ]?[1-5]$", tolower(names(faculty_analysis_data)))]
+q9_cols <- q9_cols[order(as.integer(str_extract(q9_cols, "\\d+$")))]
+stopifnot(length(q9_cols) == 5)
+
+resp_levels <- c("Expert","Proficient","Intermediate","Beginner","No Experience")
+task_labels <- c(
+  "Implement AI-assisted coding environments for teaching",
+  "Use AI tools for real-time data analysis and visualization in class",
+  "Automate student feedback and assessment using AI tools",
+  "Guide students in applying AI to solve real-world data science problems",
+  "Employ AI for student performance tracking & curriculum adjustments"
+)
+
+q9_long <- faculty_analysis_data %>%
+  pivot_longer(all_of(q9_cols), names_to = "item", values_to = "Response", values_drop_na = FALSE) %>%
+  mutate(
+    idx  = as.integer(str_extract(item, "\\d+$")),
+    Task = factor(task_labels[idx], levels = task_labels),
+    # normalize any odd spacing and map to ordered factor
+    Response = Response |> as.character() |> str_replace_all("\\u00A0", " ") |> str_squish(),
+    Response = factor(Response, levels = resp_levels)
+  ) %>%
+  filter(!is.na(Task), !is.na(Response))
+
+# ---- Summary ----
+grid <- tidyr::expand_grid(
+  Task = factor(task_labels, levels = task_labels),
+  Response = factor(resp_levels, levels = resp_levels)
+)
+
+q9_tab <- grid %>%
+  left_join(q9_long %>% count(Task, Response, name = "Count"), by = c("Task","Response")) %>%
+  mutate(Count = coalesce(Count, 0L)) %>%
+  group_by(Task) %>%
+  mutate(Percent = round(100 * Count / pmax(sum(Count), 1), 1)) %>%
+  ungroup()
+
+knitr::kable(q9_tab, caption = "Q9: Ability to Perform Teaching Tasks Using AI Tools — Summary")
+
+
+```
+
+
+## Q9 fixed color theme
+
+```{r}
+# ---- 1) Define faculty Likert color palette ----
+palette_likert <- c(
+  "No Experience" = "#B2182B",  # dark red
+  "Beginner"      = "#E67E22",  # orange
+  "Intermediate"  = "#F1C40F",  # yellow
+  "Proficient"    = "#48C9B0",  # teal
+  "Expert"        = "#117A65"   # dark green
+)
+
+# ---- 2) Compute summary for plotting ----
+plot_df_summary <- q9_long %>%
+  count(Task, Response, name = "Count") %>%
+  group_by(Task) %>%
+  mutate(Percent = Count / sum(Count)) %>%
+  ungroup() %>%
+  mutate(
+    Task = factor(stringr::str_wrap(as.character(Task), 34),
+                  levels = stringr::str_wrap(task_labels, 34)),
+    Response = factor(Response, levels = rev(resp_levels), ordered = TRUE),  # reversed so "Expert" at top legend
+    Label = ifelse(Percent > 0.04, paste0(round(Percent * 100), "%"), "")
+  )
+
+# ---- 3) Horizontal 100% stacked bar chart ----
+p_q9F <- ggplot(plot_df_summary, aes(y = Task, x = Percent, fill = Response)) +
+  geom_col(color = "gray30", width = 0.7) +
+  geom_text(
+    aes(label = Label),
+    position = position_stack(vjust = 0.5),
+    color = "blue",
+    size = 3,
+    fontface = "bold"
+  ) +
+
+  # Scales
+  scale_x_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    limits = c(0, 1),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(
+    values = palette_likert,
+    name = "Skill Level",
+    guide = guide_legend(reverse = TRUE)
+  ) +
+
+  # Labels
+  labs(
+    title = "Q9: Ability to Perform Teaching Tasks \nUsing AI Tools",
+    x = "Percentage of Faculty",
+    y = "Teaching Task"
+  ) +
+
+  # Theme
+  theme_publication() +
+  theme(
+    axis.text.y = element_text( size = 10.5, lineheight = 1.1),
+    axis.text.x = element_text(face = "bold", size = 10.5),
+    plot.title  = element_text(face = "bold", size = 14, hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(10, 60, 35, 15)
+  )
+
+# ---- 4) Save high-resolution figure ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q9_faculty_ability_AI_tasks.png",
+  plot = p_q9F,
+  dpi = 700,
+  width = 10.5,
+  height = 6.5,
+  units = "in"
+)
+
+# ---- 5) Display ----
+print(p_q9F)
+
+```
+
+
+## Q10: How frequently do you use AI tools in the following teaching activities?
+
+
+```{r Q10}
+# ---- 1) Select dataset ----
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+# ---- 2) Identify columns ----
+q10_cols <- names(faculty_analysis_data)[grepl("^q10[_. ]?[1-4]$", tolower(names(faculty_analysis_data)))]
+if (length(q10_cols) == 0) {
+  q10_cols <- names(faculty_analysis_data)[grepl("^q10(\\.|_|\\[|:)?\\d+$", tolower(names(faculty_analysis_data)))]
+}
+q10_cols <- q10_cols[order(as.integer(stringr::str_extract(q10_cols, "\\d+$")))]
+stopifnot(length(q10_cols) == 4)
+
+# ---- 3) Define levels ----
+resp_levels <- c("Never","Rarely","Sometimes","Often","Always")
+task_labels <- c(
+  "Automating grading or feedback for data science assignments",
+  "Engaging students through AI-assisted interactive labs (e.g., coding or machine learning exercises)",
+  "Monitoring student learning progress using AI-based analytics",
+  "Generating teaching materials with AI support"
+)
+
+
+# ---- 4) Reshape + robust mapping ----
+q10_long <- faculty_analysis_data %>%
+  pivot_longer(all_of(q10_cols), names_to = "item", values_to = "resp_raw", values_drop_na = FALSE) %>%
+  mutate(
+    idx  = as.integer(stringr::str_extract(item, "\\d+$")),
+    Task = factor(task_labels[idx], levels = task_labels),
+    txt  = as.character(resp_raw) |> stringr::str_replace_all("\\u00A0", " ") |> stringr::str_squish(),
+    num  = suppressWarnings(as.numeric(txt)),
+    Response = dplyr::case_when(
+      !is.na(num) & num == 1 ~ "Never",
+      !is.na(num) & num == 2 ~ "Rarely",
+      !is.na(num) & num == 3 ~ "Sometimes",
+      !is.na(num) & num == 4 ~ "Often",
+      !is.na(num) & num == 5 ~ "Always",
+      str_detect(txt, regex("^never$",     TRUE)) ~ "Never",
+      str_detect(txt, regex("^rarely$",    TRUE)) ~ "Rarely",
+      str_detect(txt, regex("^sometimes?$",TRUE)) ~ "Sometimes",
+      str_detect(txt, regex("^often$",     TRUE)) ~ "Often",
+      str_detect(txt, regex("^always$",    TRUE)) ~ "Always",
+      TRUE ~ NA_character_
+    ),
+    Response = factor(Response, levels = resp_levels, ordered = TRUE)
+  ) %>%
+  filter(!is.na(Task), !is.na(Response))
+
+# ---- 5) Summary table ----
+grid <- tidyr::expand_grid(
+  Task = factor(task_labels, levels = task_labels),
+  Response = factor(resp_levels, levels = resp_levels, ordered = TRUE)
+)
+
+q10_tab <- grid %>%
+  left_join(q10_long %>% count(Task, Response, name = "Count"), by = c("Task","Response")) %>%
+  mutate(Count = dplyr::coalesce(Count, 0L)) %>%
+  group_by(Task) %>%
+  mutate(Percent = round(100 * Count / pmax(sum(Count), 1), 1)) %>%
+  ungroup()
+
+knitr::kable(q10_tab, caption = "Q10: Frequency of Using AI Tools in Teaching Activities — Summary")
+
+# ---- 1) Define custom color palette (faculty Likert) ----
+palette_likert <- c(
+  "Never" = "#B2182B",      # dark red
+  "Rarely" = "#E67E22",     # orange
+  "Sometimes" = "#F1C40F",  # yellow
+  "Often" = "#48C9B0",      # teal
+  "Always" = "#117A65"      # dark green
+)
+
+# ---- 2) Compute summary for plotting ----
+plot_df_summary <- q10_long %>%
+  count(Task, Response, name = "Count") %>%
+  group_by(Task) %>%
+  mutate(Percent = Count / sum(Count)) %>%
+  ungroup() %>%
+  mutate(
+    Task = factor(stringr::str_wrap(as.character(Task), 34),
+                  levels = stringr::str_wrap(task_labels, 34)),
+    Response = factor(Response, levels = resp_levels, ordered = TRUE),
+    Label = ifelse(Percent > 0.04, paste0(round(Percent * 100), "%"), "")
+  )
+
+# ---- 3) Horizontal 100% stacked bar chart ----
+p_q10F <- ggplot(plot_df_summary, aes(y = Task, x = Percent, fill = Response)) +
+  geom_col(color = "gray30", width = 0.7) +
+
+  # Inline percent labels
+  geom_text(
+    aes(label = Label),
+    position = position_stack(vjust = 0.5),
+    color = "blue",
+    size = 3,
+    fontface = "bold"
+  ) +
+
+  # Scales
+  scale_x_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    limits = c(0, 1),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(
+    values = palette_likert,
+    name = "Response",
+    guide = guide_legend(reverse = TRUE)
+  ) +
+
+  # Labels
+  labs(
+    title = "Q10: Frequency of Using AI Tools in \nTeaching Activities",
+    x = "Percentage of Responses",
+    y = "Teaching Task"
+  ) +
+
+  # Theme
+  theme_publication() +
+  theme(
+    axis.text.y = element_text(face = "bold", size = 10, lineheight = 1.1),
+    axis.text.x = element_text(face = "bold", size = 10),
+    plot.title  = element_text(face = "bold", size = 14, hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(10, 60, 35, 15)
+  )
+
+# ---- 4) Save high-resolution figure ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q10_faculty_frequency_AI_teaching.png",
+  plot = p_q10F,
+  dpi = 700,
+  width = 9.5,
+  height = 6.5,
+  units = "in"
+)
+
+# ---- 5) Display ----
+print(p_q10F)
+```
+
+
+## Q11
+
+```{r}
+# ---- 1) Data selection ----
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+q11_cols <- names(faculty_analysis_data)[grepl("^q11[_. ]?[1-5]$", tolower(names(faculty_analysis_data)))]
+if (length(q11_cols) == 0) {
+  q11_cols <- names(faculty_analysis_data)[grepl("^q11(\\.|_|\\[|:)?\\d+$", tolower(names(faculty_analysis_data)))]
+}
+q11_cols <- q11_cols[order(as.integer(stringr::str_extract(q11_cols, "\\d+$")))]
+stopifnot(length(q11_cols) == 5)
+
+resp_levels <- c("Strongly Disagree","Disagree","Neutral","Agree","Strongly Agree")
+item_labels <- c(
+  "AI tools are vital for \nfuture data science education.",
+  "AI can significantly improve \nthe teaching of data science topics like machine learning, deep learning, and big data.",
+  "Over-reliance on AI tools may \nreduce the development of critical thinking skills in students.",
+  "AI tools can efficiently automate \nrepetitive teaching tasks, freeing up time for more complex educational engagements.",
+  "AI tools are capable of improving \nequity and inclusion in data science education."
+)
+
+# ---- 2) Long format ----
+q11_long <- faculty_analysis_data %>%
+  pivot_longer(all_of(q11_cols), names_to = "item", values_to = "resp_raw", values_drop_na = FALSE) %>%
+  mutate(
+    idx  = as.integer(stringr::str_extract(item, "\\d+$")),
+    Statement = factor(item_labels[idx], levels = item_labels),
+    txt  = str_squish(str_replace_all(as.character(resp_raw), "\\u00A0", " ")),
+    num  = suppressWarnings(as.numeric(txt)),
+    Response = case_when(
+      num == 1 ~ "Strongly Disagree",
+      num == 2 ~ "Disagree",
+      num == 3 ~ "Neutral",
+      num == 4 ~ "Agree",
+      num == 5 ~ "Strongly Agree",
+      str_detect(txt, regex("^strongly\\s*disagree$", TRUE)) ~ "Strongly Disagree",
+      str_detect(txt, regex("^disagree$", TRUE))              ~ "Disagree",
+      str_detect(txt, regex("^neutral$", TRUE))               ~ "Neutral",
+      str_detect(txt, regex("^agree$", TRUE))                 ~ "Agree",
+      str_detect(txt, regex("^strongly\\s*agree$", TRUE))     ~ "Strongly Agree",
+      TRUE ~ NA_character_
+    ),
+    Response = factor(Response, levels = resp_levels, ordered = TRUE)
+  ) %>%
+  filter(!is.na(Statement), !is.na(Response))
+
+# ---- 3) Plot dataframe ----
+plot_data <- q11_long %>%
+  mutate(
+    Statement = factor(
+      str_wrap(as.character(Statement), 40),
+      levels = str_wrap(item_labels, 40)
+    ),
+    Response = factor(Response, levels = resp_levels, ordered = TRUE)
+  )
+
+# ---- 4) Horizontal 100% stacked bar chart ----
+# ---- 1) Define Likert color palette (same as student version) ----
+palette_likert <- c(
+  "Strongly Disagree" = "#B2182B",  # dark red
+  "Disagree"          = "#E67E22",  # orange
+  "Neutral"           = "#F1C40F",  # yellow
+  "Agree"             = "#48C9B0",  # teal
+  "Strongly Agree"    = "#117A65"   # dark green
+)
+
+# ---- 2) Compute summary for plotting ----
+plot_df_summary <- q11_long %>%
+  count(Statement, Response, name = "Count") %>%
+  group_by(Statement) %>%
+  mutate(Percent = Count / sum(Count)) %>%
+  ungroup() %>%
+  mutate(
+    Statement = factor(
+      stringr::str_wrap(as.character(Statement), 40),
+      levels = stringr::str_wrap(item_labels, 40)
+    ),
+    Response = factor(Response, levels = resp_levels, ordered = TRUE),
+    Label = ifelse(Percent > 0.04, paste0(round(Percent * 100), "%"), "")
+  )
+
+# ---- 3) Horizontal 100% stacked bar chart ----
+p_q11F <- ggplot(plot_df_summary, aes(y = Statement, x = Percent, fill = Response)) +
+  geom_col(color = "gray30", width = 0.7) +
+
+  # Inline percentage labels
+  geom_text(
+    aes(label = Label),
+    position = position_stack(vjust = 0.5),
+    color = "black",
+    size = 3,
+    fontface = "bold"
+  ) +
+
+  # Scales and colors
+  scale_x_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    limits = c(0, 1),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(
+    values = palette_likert,
+    name = "Response",
+    guide = guide_legend(reverse = TRUE)
+  ) +
+
+  # Titles and labels
+  labs(
+    title = "Q11: Faculty Attitudes Toward AI in Data Science Education",
+    x = "Percentage of Responses",
+    y = "Statement"
+  ) +
+
+  # Publication-style theme
+  theme_publication() +
+  theme(
+    axis.text.y = element_text(face = "bold", size = 10.5, lineheight = 1.1),
+    axis.text.x = element_text(face = "bold", size = 10.5),
+    plot.title  = element_text(face = "bold", size = 14, hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(10, 60, 35, 15)
+  )
+
+# ---- 4) Save high-resolution figure ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q11_faculty_attitudes_AI_education.png",
+  plot = p_q11F,
+  dpi = 700,
+  width = 9.5,
+  height = 6.5,
+  units = "in"
+)
+
+# ---- 5) Display ----
+print(p_q11F)
+
+```
+
+
+## Q12: Do you believe that AI tools should complement or replace traditional methods of teaching data science?
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+q12_col <- dplyr::case_when(
+  "Q12" %in% names(faculty_analysis_data) ~ "Q12",
+  "q12" %in% names(faculty_analysis_data) ~ "q12",
+  TRUE ~ NA_character_
+)
+stopifnot(!is.na(q12_col))
+
+# ---- Canonical labels in instrument order ----
+levels_q12 <- c(
+  "AI tools should complement traditional methods.",
+  "AI tools should balance with traditional methods.",
+  "AI tools should replace traditional methods in some contexts.",
+  "AI tools should not replace traditional methods."
+)
+
+# ---- Map numeric or text to canonical labels ----
+faculty_analysis_data <- faculty_analysis_data %>%
+  mutate(
+    q12_raw = .data[[q12_col]],
+    txt = as.character(q12_raw) |>
+      str_replace_all("\\u00A0", " ") |>
+      str_squish(),
+    num = suppressWarnings(as.numeric(txt)),
+    q12_std = case_when(
+      !is.na(num) & num == 1 ~ levels_q12[1],
+      !is.na(num) & num == 2 ~ levels_q12[2],
+      !is.na(num) & num == 3 ~ levels_q12[3],
+      !is.na(num) & num == 4 ~ levels_q12[4],
+      str_detect(txt, regex("\\bcomplement\\b",  TRUE)) ~ levels_q12[1],
+      str_detect(txt, regex("\\bbalance\\b",     TRUE)) ~ levels_q12[2],
+      str_detect(txt, regex("replace.*some",     TRUE)) ~ levels_q12[3],
+      str_detect(txt, regex("not\\s*replace",    TRUE)) ~ levels_q12[4],
+      TRUE ~ NA_character_
+    ) |> factor(levels = levels_q12)
+  )
+
+
+# ---- 1) Summary table ----
+q12_tab <- faculty_analysis_data %>%
+  filter(!is.na(q12_std) & q12_std != "") %>%   # keep valid responses only
+  count(q12_std, name = "Count") %>%
+  mutate(
+    Percent = Count / sum(Count),
+    Label   = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  )
+
+n_valid <- sum(q12_tab$Count)
+
+# ---- 2) Prepare plotting dataframe with wrapped labels ----
+plot_data <- q12_tab %>%
+  mutate(option = factor(
+    str_wrap(as.character(q12_std), 38),
+    levels = str_wrap(levels_q12, 38)
+  ))
+
+# ---- 3) Horizontal bar chart with refined publication theme ----
+p_q12 <- ggplot(plot_data, aes(
+  y = fct_reorder(option, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline count + percent labels
+  geom_text(
+    aes(label = Label),
+    hjust = -0.1, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting (percentage scale)
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_data$Percent) + 0.1),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles and captions
+  labs(
+    title    = "Q12: Complement vs. Replace Traditional Methods",
+#    subtitle = "Single response per faculty; percentages add to 100%",
+    x        = "Percentage of Faculty",
+    y        = "Response",
+    caption  = paste0("n = ", n_valid, " valid faculty responses.")
+  ) +
+
+  # Consistent publication theme (same as Q22)
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y  = element_text(size = 10.5, lineheight = 1.1),
+    axis.text.x  = element_text(size = 10.5),
+    plot.title   = element_text(face = "bold", size = 14),
+    plot.subtitle= element_text(size = 11),
+    plot.caption = element_text(size = 9),
+    plot.margin  = margin(10, 60, 35, 15)   # extra right margin for labels
+  )
+
+# ---- 4) Save high-resolution figure ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q12_Complement_vs_Replace_horizontal_pub.png",
+  plot = p_q12,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+# ---- 5) Display plot and summary table ----
+print(p_q12)
+knitr::kable(q12_tab, caption = paste0("Q12: Complement vs. Replace (n = ", n_valid, ")"))
+```
+
+
+## Q13: How concerned are you about the following aspects of AI integration in data science education?
+
+
+```{r}
+# ---- 0) Data source ----
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+# ---- 1) Detect Q13 sub-items ----
+q13_cols <- names(faculty_analysis_data)[grepl("^q13[_. ]?[1-5]$", tolower(names(faculty_analysis_data)))]
+if (length(q13_cols) == 0) {
+  q13_cols <- names(faculty_analysis_data)[grepl("^q13(\\.|_|\\[|:)?\\d+$", tolower(names(faculty_analysis_data)))]
+}
+q13_cols <- q13_cols[order(as.integer(str_extract(q13_cols, "\\d+$")))]
+stopifnot(length(q13_cols) == 5)
+
+# ---- 2) Define levels, labels, and palette ----
+resp_levels <- c("Very Concerned","Somewhat Concerned","Neutral","Not Concerned")
+
+item_labels <- c(
+  "AI may produce biased results",
+  "Lack of transparency in how AI generates outputs",
+  "Keeping up with evolving AI technologies",
+  "Overreliance on AI tools \nreducing faculty–student engagement",
+  "Data privacy and security issues"
+)
+
+
+# ---- Red–Teal publication palette ----
+pal_q13 <- c(
+  "Very Concerned"     =  "#B2182B",
+  "Somewhat Concerned" =  "#E67E22",
+  "Neutral"            =  "#F1C40F",
+  "Not Concerned"      =  "#48C9B0"
+)
+
+# ---- 3) Reshape and clean ----
+q13_long <- faculty_analysis_data %>%
+  pivot_longer(all_of(q13_cols), names_to = "item", values_to = "resp_raw", values_drop_na = FALSE) %>%
+  mutate(
+    idx  = as.integer(str_extract(item, "\\d+$")),
+    Concern = factor(item_labels[idx], levels = item_labels),
+    txt  = str_replace_all(as.character(resp_raw), "\\u00A0", " ") |> str_squish(),
+    num  = suppressWarnings(as.numeric(txt)),
+    Response = case_when(
+      !is.na(num) & num == 1 ~ "Very Concerned",
+      !is.na(num) & num == 2 ~ "Somewhat Concerned",
+      !is.na(num) & num == 3 ~ "Neutral",
+      !is.na(num) & num == 4 ~ "Not Concerned",
+      str_detect(txt, regex("^very\\s*concerned$", TRUE))     ~ "Very Concerned",
+      str_detect(txt, regex("^somewhat\\s*concerned$", TRUE)) ~ "Somewhat Concerned",
+      str_detect(txt, regex("^neutral$", TRUE))               ~ "Neutral",
+      str_detect(txt, regex("^not\\s*concerned$", TRUE))      ~ "Not Concerned",
+      TRUE ~ NA_character_
+    ),
+    Response = factor(Response, levels = resp_levels, ordered = TRUE)
+  ) %>%
+  filter(!is.na(Concern), !is.na(Response))
+
+# ---- 4) Calculate proportions ----
+plot_df_q13 <- q13_long %>%
+  count(Concern, Response, .drop = FALSE) %>%
+  group_by(Concern) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup() %>%
+  mutate(
+    Concern = factor(str_wrap(Concern, 45),
+                     levels = str_wrap(item_labels, 45))
+  )
+
+# ---- 5) Horizontal stacked bar with text labels ----
+p_fac_q13 <- ggplot(plot_df_q13, aes(y = Concern, x = pct, fill = Response)) +
+  geom_bar(stat = "identity", color = "gray30", width = 0.7) +
+  geom_text(
+    aes(label = ifelse(pct > 0.04, paste0(round(pct * 100), "%"), "")),
+    position = position_stack(vjust = 0.5),
+    color = "black", size = 3, fontface = "bold"
+  ) +
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(values = pal_q13, guide = guide_legend(reverse = TRUE)) +
+  labs(
+    title = "Faculty Concerns About AI Integration \ninto Data Science Education",
+  #  subtitle = "Proportion of faculty indicating level of concern for each issue",
+    x = "Percentage of Responses",
+    y = "Concern",
+    fill = "Response",
+ #   caption = "Note: Percentages are calculated of faculty responses within each concern."
+  ) +
+  theme_publication()
+
+# ---- 6) Save high-resolution PNG ----
+ggsave(
+  filename = "Faculty_figures/Q13_faculty_concerns.png",
+  plot = p_fac_q13,
+  dpi = 700,
+  width = 9.5,
+  height = 6.5,
+  units = "in"
+)
+
+print(p_fac_q13)
+
+```
+
+
+##  Q14: What are the biggest challenges you face in integrating AI tools into your data science courses?
+
+```{r}
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+# ---- Canonical labels in instrument order ----
+opt_map <- c(
+  "1" = "Difficulty in learning \nand mastering AI tools",
+  "2" = "Insufficient institutional \nsupport or training",
+  "3" = "Ethical concerns \n(fairness, bias)",
+  "4" = "Limited access to advanced \nAI tools or platforms",
+  "5" = "Resistance from students \nor faculty to adopt AI tools",
+  "6" = "Balancing AI tools with \nthe curriculum’s learning objectives"
+)
+canon_levels <- unname(opt_map)
+
+# # # ---- Detect export style ----
+nm <- names(faculty_analysis_data)
+q14_single <- nm[tolower(nm) == "q14"]
+q14_wide   <- nm[str_detect(tolower(nm), "^q14(\\.|_|\\s|\\[|:)?\\d+$")]
+q14_wide   <- setdiff(q14_wide, nm[str_detect(tolower(nm), "text|comment")])
+
+faculty_analysis_data <- mutate(faculty_analysis_data, .row = row_number())
+
+# ---- Tidy to long format (rows = respondent selections) ----
+if (length(q14_wide) >= 1) {
+  # A) Multi-column export Q14_1..Q14_6
+  long <- faculty_analysis_data %>%
+    select(.row, all_of(q14_wide)) %>%
+    pivot_longer(-.row, names_to = "col", values_to = "val") %>%
+    mutate(
+      idx = str_extract(col, "\\d+$"),
+      option = unname(opt_map[idx]),
+      val_chr = tolower(str_squish(as.character(val))),
+      selected = case_when(
+        val_chr %in% c("1","true","t","yes","y","selected","checked") ~ TRUE,
+        val_chr %in% c("0","false","f","no","n","not selected","")     ~ FALSE,
+        suppressWarnings(!is.na(as.numeric(val_chr)) & as.numeric(val_chr) > 0) ~ TRUE,
+        TRUE ~ NA
+      )
+    ) %>%
+    filter(!is.na(option), isTRUE(selected)) %>%
+    select(.row, option)
+} else if (length(q14_single) == 1) {
+  # B) Single column with comma/semicolon separated choices
+  long <- faculty_analysis_data %>%
+    select(.row, q14 = all_of(q14_single)) %>%
+    filter(!is.na(q14), q14 != "") %>%
+    mutate(q14 = str_split(q14, "[,;]")) %>%
+    unnest(q14) %>%
+    mutate(q14 = str_squish(q14),
+           option = case_when(
+             str_detect(q14, regex("difficulty|master", TRUE))         ~ opt_map["1"],
+             str_detect(q14, regex("support|training", TRUE))          ~ opt_map["2"],
+             str_detect(q14, regex("ethic|fairness|bias", TRUE))       ~ opt_map["3"],
+             str_detect(q14, regex("access|platform", TRUE))           ~ opt_map["4"],
+             str_detect(q14, regex("resistance|adopt", TRUE))          ~ opt_map["5"],
+             str_detect(q14, regex("curriculum|objective", TRUE))      ~ opt_map["6"],
+             TRUE ~ NA_character_
+           )) %>%
+    filter(!is.na(option)) %>%
+    select(.row, option)
+} else {
+  stop("Q14 columns not found.")
+}
+# #
+# ---- Summary table ----
+denom <- length(unique(long$.row))
+
+```
+
+
+## (redone no duplicates)
+
+```{r}
+# --- Sanity checks ---
+denom <- n_distinct(long$.row)   # number of valid (non-empty) respondents
+total_mentions <- nrow(long)     # total selections across all respondents
+message("Respondents (denom): ", denom, " | Total selections (mentions): ", total_mentions)
+
+
+# --- Safety: ensure no duplicate (.row, option) pairs are counted twice ---
+long_nodup <- long %>% distinct(.row, option)
+
+# --- Summary table (counts & percents based on respondents) ---
+q14_tab <- long_nodup %>%
+  count(option, name = "Count") %>%
+  complete(option = canon_levels, fill = list(Count = 0)) %>%
+  mutate(
+    Percent = Count / denom,
+    Label   = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  ) %>%
+  arrange(desc(Count))  # sort by frequency
+
+# optional: print table
+knitr::kable(
+  q14_tab %>% rename(Option = option),
+  caption = paste0("Q14: Biggest Challenges Integrating AI Tools — Summary (n = ", denom, ")")
+)
+
+# --- Plot (Q22 style: horizontal, counts+percents, same colors/fonts) ---
+p_q14 <- ggplot(q14_tab, aes(
+  y = fct_reorder(option, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+  geom_text(aes(label = Label),
+            hjust = -0.1, fontface = "bold", size = 3.6, color = "black") +
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(q14_tab$Percent) + 0.15),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  labs(
+    title    = "Q14: Challenges Integrating AI Tools in Teaching",
+    subtitle = "Multiple selections allowed; percentages based on valid faculty respondents",
+    x        = "Percentage of Faculty",
+    y        = "Challenge",
+    caption  = paste0(
+      "n = ", denom,
+      " faculty respondents."
+    )
+  ) +
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y  = element_text(size = 10.5, lineheight = 1.1),
+    axis.text.x  = element_text(size = 10.5),
+    plot.title   = element_text(face = "bold", size = 14),
+    plot.subtitle= element_text(size = 11),
+    plot.caption = element_text(size = 9),
+    plot.margin  = margin(10, 60, 35, 15)   # extra right margin for labels
+  )
+
+
+ggsave(
+  filename = "Faculty_figures/Q14_Challenges_AI.png",
+  plot = p_q14,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+# ---- 5) Display plot and summary table ----
+print(p_q14)
+knitr::kable(
+  q14_tab %>% rename(Option = option),
+  caption = paste0("Q14: Biggest Challenges Integrating AI Tools (n = ", n_valid, ")")
+)
+```
+
+## Q15: To what extent do you agree that AI tools can enhance the following aspects of data science teaching?
+
+```{r, warning=FALSE, message=FALSE}
+# --- Faculty Q15: Agreement that AI Tools Enhance Aspects of DS Teaching ---
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+# Detect relevant Q15 columns
+q15_cols <- names(faculty_analysis_data)[grepl("^q15[_. ]?[1-5]$", tolower(names(faculty_analysis_data)))]
+if (length(q15_cols) == 0) {
+  q15_cols <- names(faculty_analysis_data)[grepl("^q15(\\.|_|\\[|:)?\\d+$", tolower(names(faculty_analysis_data)))]
+}
+q15_cols <- q15_cols[order(as.integer(stringr::str_extract(q15_cols, "\\d+$")))]
+stopifnot(length(q15_cols) == 5)
+
+# --- Response levels and improved line-broken item labels ---
+resp_levels <- c("Strongly Disagree", "Disagree", "Neutral", "Agree", "Strongly Agree")
+
+item_labels <- c(
+  "Automating assessment \nand feedback for DS projects",
+  "Personalizing learning paths \nusing AI-driven insights",
+  "Simplifying complex DS concepts \nwith AI-enhanced visualizations",
+  "Supporting real-time tracking \nand identifying student challenges",
+  "Enhancing engagement via \nAI-driven interactive modules"
+)
+
+# --- Map responses numerically or textually ---
+q15_long <- faculty_analysis_data %>%
+  pivot_longer(all_of(q15_cols), names_to = "item", values_to = "resp_raw", values_drop_na = FALSE) %>%
+  mutate(
+    idx  = as.integer(stringr::str_extract(item, "\\d+$")),
+    Aspect = factor(item_labels[idx], levels = item_labels),
+    txt  = as.character(resp_raw) |> stringr::str_replace_all("\\u00A0", " ") |> stringr::str_squish(),
+    num  = suppressWarnings(as.numeric(txt)),
+    Response = dplyr::case_when(
+      num == 1 ~ "Strongly Disagree",
+      num == 2 ~ "Disagree",
+      num == 3 ~ "Neutral",
+      num == 4 ~ "Agree",
+      num == 5 ~ "Strongly Agree",
+      str_detect(txt, regex("^strongly\\s*disagree$", TRUE)) ~ "Strongly Disagree",
+      str_detect(txt, regex("^disagree$", TRUE))              ~ "Disagree",
+      str_detect(txt, regex("^neutral$", TRUE))               ~ "Neutral",
+      str_detect(txt, regex("^agree$", TRUE))                 ~ "Agree",
+      str_detect(txt, regex("^strongly\\s*agree$", TRUE))     ~ "Strongly Agree",
+      TRUE ~ NA_character_
+    ),
+    Response = factor(Response, levels = resp_levels, ordered = TRUE)
+  ) %>%
+  filter(!is.na(Aspect), !is.na(Response))
+
+# --- Compute proportions ---
+plot_data <- q15_long %>%
+  count(Aspect, Response, .drop = FALSE) %>%
+  group_by(Aspect) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup() %>%
+  group_by(Aspect) %>%
+  mutate(pct_agree = sum(pct[Response %in% c("Agree","Strongly Agree")], na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Aspect = fct_reorder(Aspect, pct_agree, .desc = TRUE))
+
+# --- Define publication red–teal Likert palette ---
+pal_q15 <- c(
+  "Strongly Disagree" = "#B2182B",
+  "Disagree"          = "#E67E22",
+  "Neutral"           = "#F1C40F",
+  "Agree"             = "#48C9B0",
+  "Strongly Agree"    = "#117A65"
+)
+
+# --- Plot ---
+# --- Plot with increased vertical spacing between bars ---
+p_q15_faculty <- ggplot(plot_data, aes(y = Aspect, x = pct, fill = Response)) +
+  geom_bar(stat = "identity", color = "gray30", width = 0.55) +  # Reduced width adds vertical space
+  geom_text(
+    aes(label = ifelse(pct > 0.04, paste0(round(pct * 100), "%"), "")),
+    position = position_stack(vjust = 0.5),
+    color = "black", size = 3, fontface = "bold", lineheight = 0.9
+  ) +
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(values = pal_q15, guide = guide_legend(reverse = TRUE)) +
+  labs(
+    title = "Q15: Faculty Opinions on AI Tools' \nPotential to Enhance DS Teaching",
+  #  subtitle = "Responses grouped by agreement level",
+    x = "Percentage of Responses",
+    y = "Teaching Enhancement Aspect",
+    fill = "Response",
+  #  caption = "Note: Percentages represent the proportion of responses within each aspect category."
+  ) +
+  theme_publication() +
+  theme(
+    axis.text.y = element_text(face = "bold", lineheight = 1.1),  # improves readability
+    panel.spacing.y = grid::unit(0.5, "lines"),                         # adds vertical padding between facets (if used)
+    plot.margin = margin(10, 20, 45, 20)                          # a bit more bottom space for legend
+  )
+
+# --- Save High-Resolution Figure ---
+ggsave(
+  filename = "Faculty_figures/Q15_AI_DS_Teaching.png",
+  plot = p_q15_faculty,
+  dpi = 700,
+  width = 9.5,
+  height = 6.8,  # slightly taller for improved readability
+  units = "in"
+)
+
+print(p_q15_faculty)
+
+
+```
+
+
+## Q17: How aware are you of your institution's guidelines on the use of AI in teaching and assessments?
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+q17_col <- dplyr::case_when(
+  "Q17" %in% names(faculty_analysis_data) ~ "Q17",
+  "q17" %in% names(faculty_analysis_data) ~ "q17",
+  TRUE ~ NA_character_
+)
+stopifnot(!is.na(q17_col))
+
+# Map to instrument labels
+aware_levels <- c("Very Aware", "Somewhat Aware", "Neutral", "Not Aware")
+
+dat_q17 <- faculty_analysis_data %>%
+  mutate(
+    q17_raw = .data[[q17_col]],
+    q17_txt = str_squish(as.character(q17_raw)),
+    q17_num = suppressWarnings(as.numeric(q17_txt)),
+    q17_std = case_when(
+      !is.na(q17_num) & q17_num == 1 ~ "Very Aware",
+      !is.na(q17_num) & q17_num == 2 ~ "Somewhat Aware",
+      !is.na(q17_num) & q17_num == 3 ~ "Neutral",
+      !is.na(q17_num) & q17_num == 4 ~ "Not Aware",
+      str_detect(q17_txt, regex("^very\\s*aware$", TRUE))     ~ "Very Aware",
+      str_detect(q17_txt, regex("^somewhat\\s*aware$", TRUE)) ~ "Somewhat Aware",
+      str_detect(q17_txt, regex("^neutral$", TRUE))           ~ "Neutral",
+      str_detect(q17_txt, regex("^not\\s*aware$", TRUE))      ~ "Not Aware",
+      TRUE ~ NA_character_
+    ) |> factor(levels = aware_levels, ordered = TRUE)
+  )
+
+dat_q17_clean <- dat_q17 %>% filter(!is.na(q17_std))
+
+
+# ---- 1) Compute Counts, Percents, and Labels ----
+q17_tab <- dat_q17_clean  %>%
+  filter(!is.na(q17_std) & q17_std != "") %>%
+  count(q17_std, name = "Count") %>%
+  mutate(
+    Percent = Count / sum(Count),
+    Label   = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  ) %>%
+  arrange(desc(Percent))
+
+n_valid <- sum(q17_tab$Count)
+
+# ---- 2) Prepare data for plotting ----
+plot_data <- q17_tab %>%
+  mutate(Response = str_wrap(as.character(q17_std), 44))
+
+# ---- 3) Horizontal Bar Chart ----
+p_q17_faculty <- ggplot(plot_data, aes(
+  y = fct_reorder(Response, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline labels (Count + Percent)
+  geom_text(
+    aes(label = Label),
+    hjust = -0.05,
+    fontface = "bold",
+    size = 3.6,
+    color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_data$Percent) + 0.1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+
+  # Titles & caption
+  labs(
+    title    = "Q17: Awareness of Institutional AI Guidelines",
+    subtitle = "Single response per faculty; percentages add to 100%",
+    x        = "Percentage of Faculty",
+    y        = "Response",
+    caption  = paste0("n = ", n_valid, " valid faculty responses.")
+  ) +
+
+  # Publication-style theme (consistent with Q18–Q23)
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y  = element_text(size = 10.5, lineheight = 1.1, face = "bold"),
+    axis.text.x  = element_text(size = 10.5),
+    plot.title   = element_text(face = "bold", size = 14),
+    plot.subtitle= element_text(size = 11),
+    plot.caption = element_text(size = 9),
+    plot.margin  = margin(10, 100, 35, 15)  # add right padding for labels
+  )
+
+# ---- 4) Save High-Resolution PNG ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q17_faculty_awareness_AI_guidelines_horizontal_pub.png",
+  plot = p_q17_faculty,
+  dpi = 700,
+  width = 9.0,
+  height = 5.5,
+  units = "in"
+)
+
+# ---- 5) Display Plot and Table ----
+print(p_q17_faculty)
+
+knitr::kable(
+  q17_tab %>% rename(Response = q17_std),
+  caption = paste0("Q17: Awareness of Institutional AI Guidelines (n = ", n_valid, ")")
+)
+```
+
+
+## Q18: What primary ethical concern do you have about using AI tools in education?
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+nm <- names(faculty_analysis_data)
+q18_col <- dplyr::case_when(
+  "Q18" %in% nm ~ "Q18",
+  "q18" %in% nm ~ "q18",
+  TRUE ~ {
+    cands <- nm[grepl("^q18", tolower(nm))]
+    cands <- cands[!grepl("text|comment|other", tolower(cands))]
+    if (length(cands)) cands[1] else NA_character_
+  }
+)
+stopifnot(!is.na(q18_col))
+
+eth_levels <- c(
+  "Bias in AI-driven student evaluations",
+  "Infringement on student privacy with AI monitoring tools",
+  "Overreliance on AI leading to less human oversight in teaching and assessments"
+)
+
+# ---- Standardize responses (numeric or text) ----
+df_q18 <- faculty_analysis_data %>%
+  mutate(
+    q18_raw = .data[[q18_col]],
+    txt  = str_squish(as.character(q18_raw)),
+    num  = suppressWarnings(as.numeric(txt)),
+    q18_std = case_when(
+      !is.na(num) & num == 1 ~ eth_levels[1],
+      !is.na(num) & num == 2 ~ eth_levels[2],
+      !is.na(num) & num == 3 ~ eth_levels[3],
+      str_detect(txt, regex("bias|evaluation", TRUE))             ~ eth_levels[1],
+      str_detect(txt, regex("privacy|monitor", TRUE))             ~ eth_levels[2],
+      str_detect(txt, regex("over[- ]?reliance|oversight", TRUE)) ~ eth_levels[3],
+      TRUE ~ NA_character_
+    ) |> factor(levels = eth_levels, ordered = TRUE)
+  ) %>%
+  filter(!is.na(q18_std))
+
+
+# ---- 1) Summary table ----
+q18_tab <- df_q18 %>%
+  filter(!is.na(q18_std) & q18_std != "") %>%   # keep valid responses
+  count(q18_std, name = "Count") %>%
+  complete(q18_std = factor(eth_levels, levels = eth_levels, ordered = TRUE),
+           fill = list(Count = 0)) %>%
+  mutate(
+    Percent = Count / sum(Count),
+    Label = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  ) %>%
+  arrange(desc(Count))  # sort in decreasing order
+
+n_valid <- sum(q18_tab$Count)
+
+# ---- 2) Wrap long labels ----
+wrap_w <- 40
+wrapped_levels <- stringr::str_wrap(eth_levels, wrap_w)
+plot_data <- q18_tab %>%
+  mutate(Response_w = stringr::str_wrap(as.character(q18_std), wrap_w))
+
+# ---- 3) Horizontal bar chart (publication style) ----
+p_q18 <- ggplot(plot_data, aes(
+  y = fct_reorder(Response_w, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline count + percent labels
+  geom_text(
+    aes(label = Label),
+    hjust = -0.1, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis percentage formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_data$Percent) + 0.15),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+
+  # Titles & captions
+  labs(
+    title    = "Q18: Primary Ethical Concern in Using AI Tools",
+    subtitle = "Single response per faculty; percentages add to 100%",
+    x        = "Percentage of Faculty",
+    y        = "Ethical Concern",
+    caption  = paste0("n = ", n_valid, " valid faculty responses.")
+  ) +
+
+  # Apply publication theme (same as Q22, Q12)
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y  = element_text(size = 10.5, lineheight = 1.1),
+    axis.text.x  = element_text(size = 10.5),
+    plot.title   = element_text(face = "bold", size = 14),
+    plot.subtitle= element_text(size = 11),
+    plot.caption = element_text(size = 9),
+    plot.margin  = margin(10, 60, 35, 15)   # extra right margin for labels
+  )
+
+# ---- 4) Save high-resolution figure ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q18_Primary_Ethical_Concern_horizontal_pub.png",
+  plot = p_q18,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+# ---- 5) Display plot and summary table ----
+print(p_q18)
+knitr::kable(
+  q18_tab %>% rename(Response = q18_std),
+  caption = paste0("Q18: Primary Ethical Concern (n = ", n_valid, ")")
+)
+```
+
+
+## Q19: How important is it to maintain human oversight when using AI for assessments and student feedback?
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+nm <- names(faculty_analysis_data)
+q19_col <- dplyr::case_when(
+  "Q19" %in% nm ~ "Q19",
+  "q19" %in% nm ~ "q19",
+  TRUE ~ {
+    cands <- nm[grepl("^q19", tolower(nm))]
+    cands <- cands[!grepl("text|comment|other", tolower(cands))]
+    if (length(cands)) cands[1] else NA_character_
+  }
+)
+stopifnot(!is.na(q19_col))
+
+imp_levels <- c("Very Important", "Important", "Neutral", "Not Important")
+
+df_q19 <- faculty_analysis_data %>%
+  mutate(
+    q19_raw = .data[[q19_col]],
+    txt = str_squish(as.character(q19_raw)),
+    num = suppressWarnings(as.numeric(txt)),
+    q19_std = case_when(
+      !is.na(num) & num == 1 ~ imp_levels[1],
+      !is.na(num) & num == 2 ~ imp_levels[2],
+      !is.na(num) & num == 3 ~ imp_levels[3],
+      !is.na(num) & num == 4 ~ imp_levels[4],
+      str_detect(txt, regex("^very\\s*important$", TRUE)) ~ imp_levels[1],
+      str_detect(txt, regex("^important$", TRUE))         ~ imp_levels[2],
+      str_detect(txt, regex("^neutral$", TRUE))           ~ imp_levels[3],
+      str_detect(txt, regex("^not\\s*important$", TRUE))  ~ imp_levels[4],
+      TRUE ~ NA_character_
+    ) |> factor(levels = imp_levels, ordered = TRUE)
+  ) %>%
+  filter(!is.na(q19_std))
+
+
+```
+
+
+## Q19 horizontal counts & percents
+```{r}
+# ---- 1) Compute counts & percents ----
+q19_tab <- df_q19%>%
+  filter(!is.na(q19_std) & q19_std != "") %>%
+  count(q19_std, name = "Count") %>%
+  mutate(
+    Percent = Count / sum(Count),
+    Label   = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  ) %>%
+  arrange(desc(Percent))   # sort by decreasing frequency
+
+n_valid <- sum(q19_tab$Count)
+
+# ---- 2) Prepare plot data ----
+plot_data <- q19_tab %>%
+  mutate(Response = str_wrap(as.character(q19_std), 40))
+
+# ---- 3) Horizontal bar chart (publication style) ----
+p_q19 <- ggplot(plot_data, aes(
+  y = fct_reorder(Response, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline labels (counts + percents)
+  geom_text(
+    aes(label = Label),
+    hjust = -0.05, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_data$Percent) + 0.1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+
+  # Titles & captions
+  labs(
+    title    = "Q19: Importance of Maintaining Human Oversight in AI-Assisted Teaching",
+    subtitle = "Single response per faculty; percentages add to 100%",
+    x        = "Percentage of Faculty",
+    y        = "Response",
+    caption  = paste0("n = ", n_valid, " valid faculty responses.")
+  ) +
+
+  # Theme consistent with other faculty figures
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y  = element_text(size = 10.5, lineheight = 1.1),
+    axis.text.x  = element_text(size = 10.5),
+    plot.title   = element_text(face = "bold", size = 14),
+    plot.subtitle= element_text(size = 11),
+    plot.caption = element_text(size = 9),
+    plot.margin  = margin(10, 100, 35, 15)   # extra right margin for labels
+  )
+
+# ---- 4) Save high-resolution figure ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q19_Human_Oversight_horizontal_pub.png",
+  plot = p_q19,
+  dpi = 600,
+  width = 8.8,
+  height = 5.5,
+  units = "in"
+)
+
+# ---- 5) Display results ----
+print(p_q19)
+knitr::kable(
+  q19_tab %>% rename(Response = q19_std),
+  caption = paste0("Q19: Importance of Maintaining Human Oversight (n = ", n_valid, ")")
+)
+
+```
+
+## Q20: Which of the following best describe the AI policy in your syllabus/ class?
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+# ---- Locate Q20 column (ignore text/comment fields) ----
+nm <- names(faculty_analysis_data)
+q20_col <- dplyr::case_when(
+  "Q20" %in% nm ~ "Q20",
+  "q20" %in% nm ~ "q20",
+  TRUE ~ {
+    cands <- nm[grepl("^q20", tolower(nm))]
+    cands <- cands[!grepl("text|comment|other", tolower(cands))]
+    if (length(cands)) cands[1] else NA_character_
+  }
+)
+stopifnot(!is.na(q20_col))
+
+# ---- Canonical labels in instrument order ----
+policy_levels <- c(
+  "AI is NOT allowed \nfor any activities/assignments",
+  "Allowed for specific activities \ndesignated by instructor (disclosure required)",
+  "Permitted for all \nactivities/assignments with proper attribution"
+)
+
+# ---- Standardize responses; ----
+df_q20 <- faculty_analysis_data %>%
+  mutate(
+    q20_raw = .data[[q20_col]],
+    txt = str_squish(as.character(q20_raw)),
+    num = suppressWarnings(as.numeric(txt)),
+    q20_std = case_when(
+      # numeric exports
+      !is.na(num) & num == 1 ~ policy_levels[1],
+      !is.na(num) & num == 2 ~ policy_levels[2],
+      !is.na(num) & num == 3 ~ policy_levels[3],
+      # text exports (robust patterns)
+      str_detect(txt, regex("not\\s+allowed|prohibit|not\\s+permitted", TRUE)) ~ policy_levels[1],
+      str_detect(txt, regex("allowed\\s+for\\s+specific|specific\\s+activit|designat", TRUE)) ~ policy_levels[2],
+      str_detect(txt, regex("permitted|allowed\\s+for\\s+all|proper\\s+attribution", TRUE)) ~ policy_levels[3],
+      TRUE ~ NA_character_
+    ) |> factor(levels = policy_levels, ordered = TRUE)
+  ) %>%
+  filter(!is.na(q20_std))
+
+
+# ---- 1) Summary table ----
+q20_tab <- df_q20 %>%
+  filter(!is.na(q20_std) & q20_std != "") %>%   # keep valid responses only
+  count(q20_std, name = "Count") %>%
+  complete(q20_std = factor(policy_levels, levels = policy_levels, ordered = TRUE),
+           fill = list(Count = 0)) %>%
+  mutate(
+    Percent = Count / sum(Count),
+    Label = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  ) %>%
+  arrange(desc(Count))   # sort by frequency
+
+n_valid <- sum(q20_tab$Count)
+
+# ---- 2) Wrap long labels ----
+wrap_w <- 44
+wrapped_levels <- stringr::str_wrap(policy_levels, wrap_w)
+plot_data <- q20_tab %>%
+  mutate(Response_w = stringr::str_wrap(as.character(q20_std), wrap_w))
+
+# ---- 3) Horizontal bar chart (publication style) ----
+p_q20 <- ggplot(plot_data, aes(
+  y = fct_reorder(Response_w, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline count + percent labels
+  geom_text(
+    aes(label = Label),
+    hjust = -0.05, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_data$Percent) + 0.15),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+
+  # Titles & captions
+  labs(
+    title    = "Q20: AI Policy in Syllabus/Class",
+    subtitle = "Single response per faculty; percentages add to 100%",
+    x        = "Percentage of Faculty",
+    y        = "Response",
+    caption  = paste0("n = ", n_valid, " valid faculty responses.")
+  ) +
+
+  # Publication theme consistent with other figures
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y  = element_text(size = 10.5, lineheight = 1.1),
+    axis.text.x  = element_text(size = 10.5),
+    plot.title   = element_text(face = "bold", size = 14),
+    plot.subtitle= element_text(size = 11),
+    plot.caption = element_text(size = 9),
+    plot.margin  = margin(10, 100, 35, 15)   # wider right margin for labels
+  )
+
+# ---- 4) Save high-resolution figure ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q20_AI_Policy_Syllabus_horizontal_pub.png",
+  plot = p_q20,
+  dpi = 600,
+  width = 8.8,
+  height = 5.5,
+  units = "in"
+)
+
+# ---- 5) Display plot and table ----
+print(p_q20)
+knitr::kable(
+  q20_tab %>% rename(Response = q20_std),
+  caption = paste0("Q20: AI Policy in Syllabus/Class (n = ", n_valid, ")")
+)
+```
+
+
+## Q21: How confident are you in your knowledge of AI tools available for data science education?
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+nm <- names(faculty_analysis_data)
+q21_col <- dplyr::case_when(
+  "Q21" %in% nm ~ "Q21",
+  "q21" %in% nm ~ "q21",
+  TRUE ~ {
+    cands <- nm[grepl("^q21", tolower(nm))]
+    cands <- cands[!grepl("text|comment|other", tolower(cands))]
+    if (length(cands)) cands[1] else NA_character_
+  }
+)
+stopifnot(!is.na(q21_col))
+
+
+conf_levels <- c("Very Confident", "Somewhat Confident", "Neutral", "Not Confident")
+
+# ---- Standardize responses;  ----
+df_q21 <- faculty_analysis_data %>%
+  mutate(
+    q21_raw = .data[[q21_col]],
+    txt = str_squish(as.character(q21_raw)),
+    num = suppressWarnings(as.numeric(txt)),
+    q21_std = case_when(
+      !is.na(num) & num == 1 ~ conf_levels[1],
+      !is.na(num) & num == 2 ~ conf_levels[2],
+      !is.na(num) & num == 3 ~ conf_levels[3],
+      !is.na(num) & num == 4 ~ conf_levels[4],
+      str_detect(txt, regex("^very\\s*confident$", TRUE))      ~ conf_levels[1],
+      str_detect(txt, regex("^somewhat\\s*confident$", TRUE))  ~ conf_levels[2],
+      str_detect(txt, regex("^neutral$", TRUE))                ~ conf_levels[3],
+      str_detect(txt, regex("^not\\s*confident$", TRUE))       ~ conf_levels[4],
+      TRUE ~ NA_character_
+    ) |> factor(levels = conf_levels, ordered = TRUE)
+  ) %>%
+  filter(!is.na(q21_std))
+
+# ---- Summary table  ----
+q21_tab <- df_q21 %>%
+  count(q21_std, name = "Count") %>%
+  complete(q21_std = factor(conf_levels, levels = conf_levels, ordered = TRUE),
+           fill = list(Count = 0)) %>%
+  mutate(Percent = round(100 * Count / pmax(sum(Count), 1), 1)) %>%
+  arrange(q21_std)
+
+knitr::kable(q21_tab %>% rename(Response = q21_std),
+             caption = "Q21: Confidence in Knowledge of AI Tools — Summary")
+
+# ---- 1) Compute counts, percents, and labels ----
+q21_tab <- df_q21 %>%
+  filter(!is.na(q21_std) & q21_std != "") %>%
+  count(q21_std, name = "Count") %>%
+  mutate(
+    Percent = Count / sum(Count),
+    Label   = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  ) %>%
+  arrange(desc(Percent))
+
+n_valid <- sum(q21_tab$Count)
+
+# ---- 2) Prepare data for plotting ----
+plot_data <- q21_tab %>%
+  mutate(Response = str_wrap(as.character(q21_std), 44))
+
+# ---- 3) Horizontal bar chart ----
+p_q21 <- ggplot(plot_data, aes(
+  y = fct_reorder(Response, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline labels (Count + Percent)
+  geom_text(
+    aes(label = Label),
+    hjust = -0.05,
+    fontface = "bold",
+    size = 3.6,
+    color = "black"
+  ) +
+
+  # X-axis
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_data$Percent) + 0.1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+
+  # Titles and caption
+  labs(
+    title    = "Q21: Confidence in Knowledge of AI Tools",
+    subtitle = "Single response per faculty; percentages add to 100%",
+    x        = "Percentage of Faculty",
+    y        = "Confidence Level",
+    caption  = paste0("n = ", n_valid, " valid faculty responses.")
+  ) +
+
+  # Publication-style theme
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y  = element_text(size = 10.5, lineheight = 1.1, face = "bold"),
+    axis.text.x  = element_text(size = 10.5),
+    plot.title   = element_text(face = "bold", size = 14),
+    plot.subtitle= element_text(size = 11),
+    plot.caption = element_text(size = 9),
+    plot.margin  = margin(10, 100, 35, 15)   # prevents right label clipping
+  )
+
+# ---- 4) Save high-resolution figure ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q21_confidence_in_AI_tools_horizontal_pub.png",
+  plot = p_q21,
+  dpi = 700,
+  width = 9.0,
+  height = 5.5,
+  units = "in"
+)
+
+# ---- 5) Display plot & summary table ----
+print(p_q21)
+
+knitr::kable(
+  q21_tab %>% rename(Response = q21_std),
+  caption = paste0("Q21: Confidence in Knowledge of AI Tools (n = ", n_valid, ")")
+)
+```
+
+
+## Q22: What types of training or support would you need to effectively integrate AI tools into your teaching?
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+opt_map <- c(
+  "1" = "More AI-related training or professional development",
+  "2" = "Access to advanced AI platforms for classroom use",
+  "3" = "Technical support for integrating AI into the curriculum",
+  "4" = "Institutional support for purchasing AI tools",
+  "5" = "Peer collaboration and sharing best practices"
+)
+canon_levels <- unname(opt_map)
+
+# ---- Detect export style ----
+nm <- names(faculty_analysis_data)
+q22_single <- nm[tolower(nm) == "q22"]
+q22_wide   <- nm[str_detect(tolower(nm), "^q22(\\.|_|\\[|:)?\\d+")]
+q22_wide   <- setdiff(q22_wide, nm[str_detect(tolower(nm), "text|comment")])
+
+faculty_analysis_data <- mutate(faculty_analysis_data, .row = row_number())
+
+if (length(q22_wide) >= 1) {
+  # Checkbox export: Q22_1 ... Q22_5
+  long <- faculty_analysis_data %>%
+    select(.row, all_of(q22_wide)) %>%
+    pivot_longer(-.row, names_to = "col", values_to = "val") %>%
+    mutate(
+      idx = str_extract(col, "\\d+$"),
+      option = unname(opt_map[idx]),
+      val_chr = tolower(str_squish(as.character(val))),
+      selected = case_when(
+        val_chr %in% c("1","true","t","yes","y","selected","checked") ~ TRUE,
+        suppressWarnings(!is.na(as.numeric(val_chr)) & as.numeric(val_chr) > 0) ~ TRUE,
+        TRUE ~ FALSE
+      )
+    ) %>%
+    filter(!is.na(option), selected) %>%
+    select(.row, option)
+
+} else if (length(q22_single) == 1) {
+  # Single delimited column export: "A; B; C"
+  long <- faculty_analysis_data %>%
+    select(.row, q22 = all_of(q22_single)) %>%
+    filter(!is.na(q22), q22 != "") %>%
+    mutate(q22 = str_split(q22, "[,;]")) %>%
+    unnest(q22) %>%
+    mutate(q22 = str_squish(q22),
+           option = case_when(
+             str_detect(q22, regex("training|professional", TRUE)) ~ opt_map["1"],
+             str_detect(q22, regex("platform|access|classroom", TRUE)) ~ opt_map["2"],
+             str_detect(q22, regex("technical support|integrat|curriculum", TRUE)) ~ opt_map["3"],
+             str_detect(q22, regex("institutional|purchas|tools", TRUE)) ~ opt_map["4"],
+             str_detect(q22, regex("peer|collaboration|best practice", TRUE)) ~ opt_map["5"],
+             TRUE ~ NA_character_
+           )) %>%
+    filter(!is.na(option)) %>%
+    select(.row, option)
+} else {
+  stop("Q22 columns not found.")
+}
+
+# ---- Summary table (instrument order) ----
+denom <- dplyr::n_distinct(long$.row)  # respondents who selected at least one Q22 item
+
+q22_tab <- long %>%
+  count(option, name = "Count") %>%
+  complete(option = canon_levels, fill = list(Count = 0)) %>%
+  mutate(
+    option  = factor(option, levels = canon_levels),
+    Percent = round(100 * Count / pmax(denom, 1), 1)
+  ) %>%
+  arrange(option)
+
+knitr::kable(q22_tab, caption = "Q22: Training/Support Needs — Summary")
+
+# ---- Plots ----
+plot_data <- q22_tab %>%
+  mutate(option_w = factor(str_wrap(as.character(option), 40),
+                           levels = str_wrap(canon_levels, 40)))
+
+
+# ---- 1) Sort and wrap long labels ----
+plot_data <- q22_tab %>%
+  mutate(
+    option_w = fct_reorder(str_wrap(as.character(option), 40), Count)
+  )
+
+# ---- 1) Compute counts, percents, and labels ----
+# ---- 1) Define denominator = number of unique respondents ----
+denom <- 13  # or replace with n_distinct(faculty_analysis_data$.row) if dynamically computed
+
+# ---- 2) Compute counts, percents, and labels ----
+q22_faculty_tab <- plot_data %>%
+  mutate(
+    Percent = Count / denom,  # percentage of respondents
+    Label   = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  ) %>%
+  arrange(desc(Count))
+
+# ---- 3) Horizontal bar chart (Counts + Percents) ----
+p_q22_faculty_counts <- ggplot(q22_faculty_tab, aes(
+  y = fct_reorder(option_w, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline labels (Count + Percent)
+  geom_text(
+    aes(label = Label),
+    hjust = -0.05,
+    fontface = "bold",
+    size = 3.6,
+    color = "black"
+  ) +
+
+  # X-axis formatting (percent of faculty)
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(q22_faculty_tab$Percent) + 0.15),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+
+  # Titles & caption
+  labs(
+    title    = "Faculty Training and Support Needs for AI Integration",
+    subtitle = "Multiple selections allowed; percentages based on faculty respondents (n = 13)",
+    x        = "Percentage of Faculty",
+    y        = "Training or Support Area",
+    caption  = "Percentages represent proportion of faculty (not responses)."
+  ) +
+
+  # Publication theme (consistent with Q18–Q20)
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1, face = "bold"),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5, color = "gray30"),
+    plot.caption = element_text(size = 9, hjust = 0, color = "gray40"),
+    plot.margin = margin(10, 100, 35, 15)   # extra right margin for long labels
+  )
+
+# ---- 4) Save high-resolution figure ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q22_faculty_training_needs.png",
+  plot = p_q22_faculty_counts,
+  dpi = 700,
+  width = 9.0,
+  height = 5.5,
+  units = "in"
+)
+
+# ---- 5) Display plot & summary table ----
+print(p_q22_faculty_counts)
+
+knitr::kable(
+  q22_faculty_tab %>%
+    rename(`Training/Support Area` = option_w) %>%
+    select(`Training/Support Area`, Count, Percent),
+  caption = "Q22: Faculty Training and Support Needs (Percent of Faculty, n = 13)"
+)
+```
+
+
+## Q23: Do you believe your institution provides sufficient guidance and resources for using AI in teaching?
+
+
+```{r, warning=FALSE, message=FALSE}
+
+faculty_analysis_data <- if (exists("faculty_data_consented")) faculty_data_consented else faculty_data
+
+q23_col <- dplyr::case_when(
+  "Q23" %in% names(faculty_analysis_data) ~ "Q23",
+  "q23" %in% names(faculty_analysis_data) ~ "q23",
+  TRUE ~ NA_character_
+)
+stopifnot(!is.na(q23_col))
+
+canon_levels <- c("Yes", "No", "Somewhat")
+
+faculty_analysis_data <- faculty_analysis_data %>%
+  mutate(
+    q23_raw = .data[[q23_col]],
+    q23_std = case_when(
+      is.numeric(q23_raw) & q23_raw == 1 ~ "Yes",
+      is.numeric(q23_raw) & q23_raw == 2 ~ "No",
+      is.numeric(q23_raw) & q23_raw == 3 ~ "Somewhat",
+      str_detect(as.character(q23_raw), regex("^yes$", ignore_case = TRUE)) ~ "Yes",
+      str_detect(as.character(q23_raw), regex("^no$",  ignore_case = TRUE)) ~ "No",
+      str_detect(as.character(q23_raw), regex("somewhat", ignore_case = TRUE)) ~ "Somewhat",
+      TRUE ~ NA_character_
+    ) |> factor(levels = canon_levels)
+  )
+
+# ---- Summary table ----
+q23_ans <- faculty_analysis_data %>% filter(!is.na(q23_std))
+denom   <- nrow(q23_ans)
+
+q23_tab <- q23_ans %>%
+  count(q23_std, name = "Count") %>%
+  tidyr::complete(q23_std = factor(canon_levels, levels = canon_levels),
+                  fill = list(Count = 0)) %>%
+  mutate(Percent = round(100 * Count / pmax(denom, 1), 1),
+         q23_std = factor(q23_std, levels = canon_levels))
+
+knitr::kable(q23_tab,
+             col.names = c("Response", "Count", "Percent"),
+             caption   = "Q23: Does your institution provide sufficient AI guidance/resources? — Summary")
+
+q23_tab <-  q23_ans  %>%
+  filter(!is.na(q23_std) & q23_std != "") %>%
+  count(q23_std, name = "Count") %>%
+  mutate(
+    Percent = Count / sum(Count),
+    Label   = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  ) %>%
+  arrange(desc(Percent))
+
+n_valid <- sum(q23_tab$Count)
+
+# ---- 2) Prepare plot data with wrapped labels ----
+plot_data <- q23_tab %>%
+  mutate(Response = str_wrap(as.character(q23_std), 44))
+
+# ---- 3) Horizontal bar chart (publication style) ----
+p_q23 <- ggplot(plot_data, aes(
+  y = fct_reorder(Response, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline labels (counts + percents)
+  geom_text(
+    aes(label = Label),
+    hjust = -0.05,
+    fontface = "bold",
+    size = 3.6,
+    color = "black"
+  ) +
+
+  # X-axis (percent scale)
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_data$Percent) + 0.1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+
+  # Titles & caption
+  labs(
+    title    = "Q23: Do you believe your institution provides \nsufficient guidance and resources for using AI in teaching?",
+    subtitle = "Single response per faculty; percentages add to 100%",
+    x        = "Percentage of Faculty",
+    y        = "Response",
+    caption  = paste0("n = ", n_valid, " valid faculty responses.")
+  ) +
+
+  # Publication-style theme
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y  = element_text(size = 10.5, lineheight = 1.1),
+    axis.text.x  = element_text(size = 10.5),
+    plot.title   = element_text(face = "bold", size = 14),
+    plot.subtitle= element_text(size = 11),
+    plot.caption = element_text(size = 9),
+    plot.margin  = margin(10, 100, 35, 15)   # extra right margin for labels
+  )
+
+# ---- 4) Save high-resolution figure ----
+if (!dir.exists("Faculty_figures")) dir.create("Faculty_figures", recursive = TRUE)
+
+ggsave(
+  filename = "Faculty_figures/Q23_Institutional_Guidance.png",
+  plot = p_q23,
+  dpi = 700,
+  width = 9.0,
+  height = 5.5,
+  units = "in"
+)
+
+# ---- 5) Display plot & summary table ----
+print(p_q23)
+knitr::kable(
+  q23_tab %>% rename(Response = q23_std),
+  caption = paste0("Q23: Institutional Guidance/Resources (n = ", n_valid, ")")
+)
+```
+
+

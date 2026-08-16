@@ -1,0 +1,574 @@
+---
+title: "Reproducible Student Composite Score Analysis"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+# Purpose
+
+This script reproduces the student composite-score analyses reported in Tables 2 and 3 of the manuscript. The workflow is intentionally limited to the analyses required for those tables and the associated post hoc comparisons.
+
+```{r setup, warning=FALSE, message=FALSE}
+required_packages <- c("dplyr", "readxl", "psych", "lavaan", "knitr")
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    "Install the following packages before running this analysis: ",
+    paste(missing_packages, collapse = ", ")
+  )
+}
+
+options(digits = 6)
+
+# Bonferroni-adjusted significance threshold used in the manuscript for
+# the three composite-score comparisons within each subgroup analysis.
+alpha_bonf <- 0.05 / 3
+```
+
+# 1. Import and quality filtering
+
+```{r import-data, warning=FALSE, message=FALSE}
+find_student_file <- function() {
+  file_name <- "AI4DS_Student_Survey_October_5_ 2025.xlsx"
+  candidates <- c(
+    file_name,
+    file.path("data", file_name),
+    file.path("..", "data", file_name)
+  )
+
+  found <- candidates[file.exists(candidates)]
+  if (length(found) == 0) {
+    stop(
+      "Student survey Excel file not found. Expected the file in the repo root, ",
+      "data/, or ../data/ relative to the working directory."
+    )
+  }
+  found[[1]]
+}
+
+load_student_data <- function(path, min_duration = 120, min_progress = 25) {
+  # The Qualtrics export contains short variable names in row 1,
+  # question labels in row 2, and respondent data beginning in row 3.
+  header <- readxl::read_excel(path, n_max = 1, col_names = FALSE)
+  short_names <- as.character(unlist(header[1, ], use.names = FALSE))
+  short_names <- short_names[!is.na(short_names) & short_names != ""]
+
+  student_df <- readxl::read_excel(
+    path,
+    skip = 2,
+    col_names = short_names,
+    .name_repair = "minimal"
+  )
+
+  student_df |>
+    dplyr::filter(
+      `Duration (in seconds)` >= min_duration,
+      Progress >= min_progress
+    )
+}
+
+student_data_path <- find_student_file()
+student_data <- load_student_data(student_data_path)
+
+cat("Data file:", normalizePath(student_data_path), "\n")
+cat("Data MD5:", unname(tools::md5sum(student_data_path)), "\n")
+cat("Analytic sample after quality filters:", nrow(student_data), "students\n")
+
+# The distributed repository dataset is the finalized analytic file.
+# The manuscript reports n = 119 valid student responses.
+if (nrow(student_data) != 119L) {
+  stop(
+    "Unexpected analytic sample size. Expected 119 students but found ",
+    nrow(student_data),
+    ". Verify the data-file version and filtering criteria."
+  )
+}
+
+required_variables <- c(
+  "Q3", "Q5",
+  paste0("Q10_", 1:5),
+  paste0("Q18_", 1:5),
+  "Q12_1", "Q12_2",
+  "Q21_1", "Q21_2", "Q21_4"
+)
+
+missing_variables <- setdiff(required_variables, names(student_data))
+if (length(missing_variables) > 0) {
+  stop(
+    "Required variables are missing from the input file: ",
+    paste(missing_variables, collapse = ", ")
+  )
+}
+```
+
+# 2. Academic-level classification and item scoring
+
+```{r recode-items, warning=FALSE, message=FALSE}
+# In the initial survey version, "Graduate Student" was inadvertently
+# omitted from Q5. Review of respondents' reported majors established that
+# respondents with missing Q5 values in this dataset were graduate students.
+# These missing Q5 values are therefore recoded as "Graduate Student".
+student_data <- student_data |>
+  dplyr::mutate(
+    Q5 = dplyr::coalesce(as.character(Q5), "Graduate Student"),
+    class_group = dplyr::case_when(
+      Q5 %in% c("Freshman", "Sophomore") ~ "Lower-Division",
+      Q5 %in% c("Junior", "Senior") ~ "Upper-Division",
+      Q5 == "Graduate Student" ~ "Graduate",
+      TRUE ~ NA_character_
+    ),
+    class_group = factor(
+      class_group,
+      levels = c("Lower-Division", "Upper-Division", "Graduate")
+    )
+  )
+
+score_familiarity <- function(x) {
+  dplyr::recode(
+    as.character(x),
+    "Not at All Familiar" = 1,
+    "Not Very Familiar" = 2,
+    "Neutral" = 3,
+    "Somewhat Familiar" = 4,
+    "Very Familiar" = 5,
+    .default = NA_real_
+  )
+}
+
+score_awareness <- function(x) {
+  dplyr::recode(
+    as.character(x),
+    "Not at All Aware" = 1,
+    "Not Very Aware" = 2,
+    "Neutral" = 3,
+    "Somewhat Aware" = 4,
+    "Very Aware" = 5,
+    .default = NA_real_
+  )
+}
+
+score_agreement <- function(x) {
+  dplyr::recode(
+    as.character(x),
+    "Strongly Disagree" = 1,
+    "Disagree" = 2,
+    "Neutral" = 3,
+    "Agree" = 4,
+    "Strongly Agree" = 5,
+    .default = NA_real_
+  )
+}
+
+student_data <- student_data |>
+  dplyr::mutate(
+    dplyr::across(Q10_1:Q10_5, score_familiarity),
+    dplyr::across(Q18_1:Q18_5, score_awareness),
+    dplyr::across(
+      c(Q12_1, Q12_2, Q21_1, Q21_2, Q21_4),
+      score_agreement
+    )
+  )
+```
+
+# 3. Construct the composite scores
+
+The three composite scores are arithmetic means of the available selected items for each respondent. A composite is set to `NA` only when all five constituent items are missing. The Perceptions composite uses the five conceptually selected items Q12_1, Q12_2, Q21_1, Q21_2, and Q21_4.
+
+```{r construct-composites, warning=FALSE, message=FALSE}
+student_data <- student_data |>
+  dplyr::rowwise() |>
+  dplyr::mutate(
+    Q10_comp = ifelse(
+      all(is.na(dplyr::c_across(Q10_1:Q10_5))),
+      NA_real_,
+      mean(dplyr::c_across(Q10_1:Q10_5), na.rm = TRUE)
+    ),
+    Q18_comp = ifelse(
+      all(is.na(dplyr::c_across(Q18_1:Q18_5))),
+      NA_real_,
+      mean(dplyr::c_across(Q18_1:Q18_5), na.rm = TRUE)
+    ),
+    Qper_comp = ifelse(
+      all(is.na(dplyr::c_across(c(Q12_1, Q12_2, Q21_1, Q21_2, Q21_4)))),
+      NA_real_,
+      mean(
+        dplyr::c_across(c(Q12_1, Q12_2, Q21_1, Q21_2, Q21_4)),
+        na.rm = TRUE
+      )
+    )
+  ) |>
+  dplyr::ungroup()
+
+composite_summary <- dplyr::bind_rows(
+  data.frame(
+    Composite = "Familiarity",
+    n = sum(!is.na(student_data$Q10_comp)),
+    Mean = mean(student_data$Q10_comp, na.rm = TRUE),
+    SD = stats::sd(student_data$Q10_comp, na.rm = TRUE)
+  ),
+  data.frame(
+    Composite = "Perceptions",
+    n = sum(!is.na(student_data$Qper_comp)),
+    Mean = mean(student_data$Qper_comp, na.rm = TRUE),
+    SD = stats::sd(student_data$Qper_comp, na.rm = TRUE)
+  ),
+  data.frame(
+    Composite = "Awareness of Limitations",
+    n = sum(!is.na(student_data$Q18_comp)),
+    Mean = mean(student_data$Q18_comp, na.rm = TRUE),
+    SD = stats::sd(student_data$Q18_comp, na.rm = TRUE)
+  )
+) |>
+  dplyr::mutate(
+    Mean = round(Mean, 3),
+    SD = round(SD, 3)
+  )
+
+knitr::kable(composite_summary, caption = "Overall composite-score summary.")
+```
+
+# 4. Confirmatory factor analysis and reliability
+
+CFA is conducted after the composite-score variables have been constructed. The CFA models use the five constituent items for each construct and explicitly use listwise deletion for missing CFA indicators. Cronbach's alpha is calculated from the same item sets.
+
+```{r cfa-reliability, warning=FALSE, message=FALSE}
+model_familiarity <- '
+  Familiarity =~ Q10_1 + Q10_2 + Q10_3 + Q10_4 + Q10_5
+'
+
+model_perceptions <- '
+  Perceptions =~ Q12_1 + Q12_2 + Q21_1 + Q21_2 + Q21_4
+'
+
+model_awareness <- '
+  Awareness =~ Q18_1 + Q18_2 + Q18_3 + Q18_4 + Q18_5
+'
+
+fit_familiarity <- lavaan::cfa(
+  model_familiarity,
+  data = student_data,
+  missing = "listwise"
+)
+
+fit_perceptions <- lavaan::cfa(
+  model_perceptions,
+  data = student_data,
+  missing = "listwise"
+)
+
+fit_awareness <- lavaan::cfa(
+  model_awareness,
+  data = student_data,
+  missing = "listwise"
+)
+
+alpha_familiarity <- psych::alpha(
+  student_data |> dplyr::select(Q10_1:Q10_5)
+)
+
+alpha_perceptions <- psych::alpha(
+  student_data |>
+    dplyr::select(Q12_1, Q12_2, Q21_1, Q21_2, Q21_4)
+)
+
+alpha_awareness <- psych::alpha(
+  student_data |> dplyr::select(Q18_1:Q18_5)
+)
+
+make_cfa_row <- function(label, fit, alpha_object) {
+  data.frame(
+    Composite = label,
+    Chi_Square = unname(lavaan::fitMeasures(fit, "chisq")),
+    df = as.integer(unname(lavaan::fitMeasures(fit, "df"))),
+    P_value = unname(lavaan::fitMeasures(fit, "pvalue")),
+    CFI = unname(lavaan::fitMeasures(fit, "cfi")),
+    TLI = unname(lavaan::fitMeasures(fit, "tli")),
+    RMSEA = unname(lavaan::fitMeasures(fit, "rmsea")),
+    Raw_Alpha = alpha_object$total$raw_alpha,
+    Standard_Alpha = alpha_object$total$std.alpha,
+    stringsAsFactors = FALSE
+  )
+}
+
+cfa_results <- dplyr::bind_rows(
+  make_cfa_row("Familiarity", fit_familiarity, alpha_familiarity),
+  make_cfa_row("Perceptions", fit_perceptions, alpha_perceptions),
+  make_cfa_row("Awareness of Limitations", fit_awareness, alpha_awareness)
+)
+```
+
+# 5. Table 2: CFA model fit and reliability
+
+```{r table-2, warning=FALSE, message=FALSE}
+Table_2 <- cfa_results |>
+  dplyr::transmute(
+    Composite,
+    `Chi-square Stat (p-value)` = sprintf("%.3f (%.3f)", Chi_Square, P_value),
+    CFI = sprintf("%.3f", CFI),
+    TLI = sprintf("%.3f", TLI),
+    RMSEA = sprintf("%.3f", RMSEA),
+    `Raw Alpha` = sprintf("%.3f", Raw_Alpha),
+    `Standard Alpha` = sprintf("%.3f", Standard_Alpha)
+  )
+
+knitr::kable(
+  Table_2,
+  align = c("l", rep("c", 6)),
+  caption = "Table 2. Model fit statistics from confirmatory factor analysis."
+)
+```
+
+For validation, the CFA degrees of freedom and number of observations used by each listwise CFA are retained below.
+
+```{r cfa-audit, warning=FALSE, message=FALSE}
+cfa_audit <- data.frame(
+  Composite = c("Familiarity", "Perceptions", "Awareness of Limitations"),
+  df = c(
+    lavaan::fitMeasures(fit_familiarity, "df"),
+    lavaan::fitMeasures(fit_perceptions, "df"),
+    lavaan::fitMeasures(fit_awareness, "df")
+  ),
+  N_used = c(
+    lavaan::lavInspect(fit_familiarity, "nobs"),
+    lavaan::lavInspect(fit_perceptions, "nobs"),
+    lavaan::lavInspect(fit_awareness, "nobs")
+  )
+)
+
+knitr::kable(cfa_audit, caption = "CFA audit information (not part of manuscript Table 2).")
+```
+
+# 6. Subgroup analyses
+
+The subgroup analyses are intentionally performed only after all composite-score and CFA calculations are complete. Academic-level comparisons use the full eligible analytic sample. Gender comparisons use only respondents who selected Female or Male.
+
+## 6.1 Class-level comparisons
+
+```{r class-level-analysis, warning=FALSE, message=FALSE}
+score_variables <- c(
+  Familiarity = "Q10_comp",
+  Perceptions = "Qper_comp",
+  `Awareness of Limitations` = "Q18_comp"
+)
+
+class_summary_list <- lapply(names(score_variables), function(composite_name) {
+  score_name <- score_variables[[composite_name]]
+
+  student_data |>
+    dplyr::filter(!is.na(class_group)) |>
+    dplyr::group_by(class_group) |>
+    dplyr::summarise(
+      n = sum(!is.na(.data[[score_name]])),
+      Mean = mean(.data[[score_name]], na.rm = TRUE),
+      SD = stats::sd(.data[[score_name]], na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(Composite = composite_name, .before = 1)
+})
+
+class_summary <- dplyr::bind_rows(class_summary_list)
+
+class_anova <- lapply(names(score_variables), function(composite_name) {
+  score_name <- score_variables[[composite_name]]
+  fit <- stats::aov(
+    stats::reformulate("class_group", response = score_name),
+    data = student_data
+  )
+
+  data.frame(
+    Composite = composite_name,
+    F = unname(summary(fit)[[1]]["class_group", "F value"]),
+    P_value = unname(summary(fit)[[1]]["class_group", "Pr(>F)"]),
+    stringsAsFactors = FALSE
+  )
+}) |>
+  dplyr::bind_rows()
+
+class_anova
+```
+
+### Tukey post hoc comparisons reported in the manuscript
+
+```{r tukey-posthoc, warning=FALSE, message=FALSE}
+get_tukey <- function(score_name, composite_name) {
+  fit <- stats::aov(
+    stats::reformulate("class_group", response = score_name),
+    data = student_data
+  )
+  tukey <- as.data.frame(stats::TukeyHSD(fit)$class_group)
+  tukey$Comparison <- rownames(tukey)
+  rownames(tukey) <- NULL
+
+  tukey |>
+    dplyr::transmute(
+      Composite = composite_name,
+      Comparison,
+      Difference = round(diff, 3),
+      Lower_CI = round(lwr, 3),
+      Upper_CI = round(upr, 3),
+      Adjusted_P = round(`p adj`, 3)
+    )
+}
+
+# The manuscript reports post hoc results only for constructs with a
+# significant omnibus class-level ANOVA.
+tukey_results <- dplyr::bind_rows(
+  get_tukey("Q10_comp", "Familiarity"),
+  get_tukey("Q18_comp", "Awareness of Limitations")
+)
+
+knitr::kable(
+  tukey_results,
+  caption = "Tukey HSD post hoc comparisons for significant class-level ANOVAs."
+)
+```
+
+## 6.2 Gender comparisons
+
+```{r gender-analysis, warning=FALSE, message=FALSE}
+# Restrict only the gender-comparison analysis to respondents who selected
+# Female or Male. The master student_data object remains unchanged.
+gender_data <- student_data |>
+  dplyr::filter(Q3 %in% c("Female", "Male")) |>
+  dplyr::mutate(Q3 = factor(Q3, levels = c("Female", "Male")))
+
+gender_summary_list <- lapply(names(score_variables), function(composite_name) {
+  score_name <- score_variables[[composite_name]]
+
+  gender_data |>
+    dplyr::group_by(Q3) |>
+    dplyr::summarise(
+      n = sum(!is.na(.data[[score_name]])),
+      Mean = mean(.data[[score_name]], na.rm = TRUE),
+      SD = stats::sd(.data[[score_name]], na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(Composite = composite_name, .before = 1)
+})
+
+gender_summary <- dplyr::bind_rows(gender_summary_list)
+
+gender_tests <- lapply(names(score_variables), function(composite_name) {
+  score_name <- score_variables[[composite_name]]
+  test <- stats::t.test(
+    stats::reformulate("Q3", response = score_name),
+    data = gender_data,
+    var.equal = FALSE
+  )
+
+  data.frame(
+    Composite = composite_name,
+    t = unname(test$statistic),
+    df = unname(test$parameter),
+    P_value = test$p.value,
+    stringsAsFactors = FALSE
+  )
+}) |>
+  dplyr::bind_rows()
+
+gender_tests
+```
+
+# 7. Table 3: Composite-score comparisons by gender and class level
+
+Table 3 is generated directly from the subgroup summaries and hypothesis tests above. All displayed numeric values are rounded to three decimal places. Asterisks identify p-values below the Bonferroni-adjusted threshold of 0.0167 used in the manuscript.
+
+```{r table-3, warning=FALSE, message=FALSE}
+format_mean_sd <- function(mean_value, sd_value) {
+  sprintf("%.3f (%.3f)", mean_value, sd_value)
+}
+
+format_p <- function(p_value) {
+  if (is.na(p_value)) return("")
+  paste0(
+    sprintf("%.3f", p_value),
+    ifelse(p_value < alpha_bonf, "*", "")
+  )
+}
+
+extract_summary <- function(summary_df, composite_name, group_column, group_name) {
+  row <- summary_df[
+    summary_df$Composite == composite_name &
+      as.character(summary_df[[group_column]]) == group_name,
+    ,
+    drop = FALSE
+  ]
+
+  if (nrow(row) != 1) {
+    stop("Could not uniquely identify summary row for ", composite_name, " / ", group_name)
+  }
+
+  list(
+    n = row$n,
+    mean_sd = format_mean_sd(row$Mean, row$SD)
+  )
+}
+
+get_test_p <- function(test_df, composite_name) {
+  test_df$P_value[test_df$Composite == composite_name][1]
+}
+
+# The manuscript displays p-values once per comparison: on the Male row for
+# Welch gender tests and on the Graduate row for three-level ANOVA tests.
+make_table3_row <- function(group_name, comparison_type) {
+  if (comparison_type == "gender") {
+    source_df <- gender_summary
+    group_col <- "Q3"
+    p_source <- gender_tests
+    show_p <- group_name == "Male"
+  } else {
+    source_df <- class_summary
+    group_col <- "class_group"
+    p_source <- class_anova
+    show_p <- group_name == "Graduate"
+  }
+
+  fam <- extract_summary(source_df, "Familiarity", group_col, group_name)
+  per <- extract_summary(source_df, "Perceptions", group_col, group_name)
+  awa <- extract_summary(source_df, "Awareness of Limitations", group_col, group_name)
+
+  data.frame(
+    Group = group_name,
+    Familiarity_n = fam$n,
+    `Familiarity Mean (SD)` = fam$mean_sd,
+    `Familiarity P-value` = if (show_p) format_p(get_test_p(p_source, "Familiarity")) else "",
+    Perceptions_n = per$n,
+    `Perceptions Mean (SD)` = per$mean_sd,
+    `Perceptions P-value` = if (show_p) format_p(get_test_p(p_source, "Perceptions")) else "",
+    Awareness_n = awa$n,
+    `Awareness Mean (SD)` = awa$mean_sd,
+    `Awareness P-value` = if (show_p) format_p(get_test_p(p_source, "Awareness of Limitations")) else "",
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+}
+
+# Retain the manuscript row order while keeping the analysis code itself in
+# the requested order: class-level analysis first, then gender analysis.
+Table_3 <- dplyr::bind_rows(
+  make_table3_row("Female", "gender"),
+  make_table3_row("Male", "gender"),
+  make_table3_row("Lower-Division", "class"),
+  make_table3_row("Upper-Division", "class"),
+  make_table3_row("Graduate", "class")
+)
+
+knitr::kable(
+  Table_3,
+  align = c("l", rep("c", 9)),
+  caption = "Table 3. Composite score comparisons by gender and class levels."
+)
+```
+
+**Table 3 note.** Gender comparisons use Welch's two-sample t-test. Class-level comparisons use one-way ANOVA. The manuscript applies a Bonferroni-adjusted significance threshold of 0.05/3 = 0.0167 across the three composite-score tests within each subgroup analysis. Tukey HSD is used for post hoc class-level comparisons following significant omnibus ANOVAs.
+
+# 8. Reproducibility information
+
+```{r session-info}
+sessionInfo()
+```

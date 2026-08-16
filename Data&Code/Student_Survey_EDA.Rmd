@@ -1,0 +1,2742 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Reproducible analysis of the student AI for data science survey
+```{r setup-student-analysis, warning=FALSE, message=FALSE}
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(
+  dplyr, janitor, ggplot2, rlang, ggmosaic, knitr, forcats, tidyr,
+  stringr, psych, readxl, scales, kableExtra, grid, tibble, lavaan
+)
+
+# Create output directory for saved figures
+if (!dir.exists("Student_figures")) dir.create("Student_figures", recursive = TRUE)
+
+find_student_file <- function() {
+  candidates <- c(
+    "AI4DS_Student_Survey_October_5_ 2025.xlsx",
+    file.path("data", "AI4DS_Student_Survey_October_5_ 2025.xlsx")
+  )
+  found <- candidates[file.exists(candidates)]
+  if (length(found) == 0) {
+    stop(
+      "Student survey Excel file not found in the working directory. ",
+      "Place the workbook in the repo root or update `find_student_file()`."
+    )
+  }
+  found[[1]]
+}
+
+load_student_data <- function(path = find_student_file(), min_duration = 120, min_progress = 25) {
+  raw_preview <- readxl::read_excel(path)
+  short <- readxl::read_excel(path, range = "A1:BN1", col_names = FALSE) |> unlist() |> as.character()
+  long  <- readxl::read_excel(path, range = "A2:BN2", col_names = FALSE) |> unlist() |> as.character()
+  n_cols <- ncol(raw_preview)
+  short <- short[seq_len(n_cols)]
+  long  <- long[seq_len(n_cols)]
+  student_df <- readxl::read_excel(path, skip = 2, col_names = short)
+  student_header_labels <- setNames(long, short)
+  filtered_df <- student_df |>
+    dplyr::filter(`Duration (in seconds)` >= min_duration, Progress >= min_progress)
+  list(student_header_preview = raw_preview, student_data_raw = student_df, student_data_filtered = filtered_df, student_header_labels = student_header_labels)
+}
+```
+
+```{r import-student-data, warning=FALSE, message=FALSE}
+student_data_path <- find_student_file()
+student_import <- load_student_data(student_data_path)
+student_header_preview <- student_import$student_header_preview
+student_data_raw <- student_import$student_data_raw
+student_data_filtered <- student_import$student_data_filtered
+student_header_labels <- student_import$student_header_labels
+
+cat("Remaining sample size after quality filters:", nrow(student_data_filtered), "students\n")
+dim(student_data_filtered)
+```
+
+
+## set up for the colors
+```{r , warning=FALSE, message=FALSE}
+## use this palette for all next figures
+survey_palette_red_teal <- c("#117A65","#48C9B0","#F1C40F","#E67E22","#8B0000" )
+
+
+```
+
+## Saving custom theme for future use
+```{r}
+# --- Define once at the top of your script or in a separate R file ---
+theme_publication <- function(base_size = 10) {
+  theme_classic(base_size = base_size) +
+    theme(
+      plot.title      = element_text(face = "bold", size = 11, hjust = 0.5),
+      plot.subtitle   = element_text(size = 10, hjust = 0.5, color = "gray25"),
+      axis.text.x     = element_text(face = "bold", size = 10),
+      axis.text.y     = element_text(face = "bold", size = 10, lineheight = 1.1),
+      axis.title.x    = element_text(face = "bold", size = 10),
+      axis.title.y    = element_text(face = "bold", size = 10),
+      panel.grid.major.x = element_line(color = "gray90"),
+      panel.grid.minor = element_blank(),
+      legend.title    = element_text(face = "bold"),
+      legend.text     = element_text(size = 8),
+      legend.position = "bottom",
+      legend.key.size = grid::unit(0.35, "cm"),
+      legend.margin   = margin(t = 2, b = 5),
+      legend.box.margin = margin(5, 5, 10, 5),
+      legend.box = "vertical",
+      plot.caption    = element_text(size = 9, hjust = 0, color = "gray30"),
+      plot.margin     = margin(10, 15, 45, 15)
+    )
+}
+
+###
+load_publication_style <- function() {
+  # Color palette
+  assign("familiarity_palette", c(
+    "Not at All Familiar" = "#B2182B",
+    "Not Very Familiar"   = "#E67E22",
+    "Neutral"             = "#F1C40F",
+    "Somewhat Familiar"   = "#48C9B0",
+    "Very Familiar"       = "#117A65"
+  ), envir = .GlobalEnv)
+
+  # Theme
+  theme_set(theme_publication())
+}
+
+load_publication_style()
+
+```
+
+## Demographics sex table Q3-6
+```{r, warning=FALSE, message=FALSE}
+## Demographics table Q3-6
+# ---- 1) Q3 Summary: Student Sex ----
+q3_summary <- student_data_filtered %>%
+  filter(!is.na(Q3)) %>%
+  tabyl(Q3) %>%
+  adorn_totals("row") %>%
+  adorn_percentages("col") %>%
+  adorn_pct_formatting(digits = 3)
+
+
+# ---- 1) Q3 Summary: Student Sex ----
+
+
+# total valid responses
+n_valid_q3 <- student_data_filtered %>% filter(!is.na(Q3)) %>% nrow()
+
+q3_summary <- student_data_filtered %>%
+  filter(!is.na(Q3)) %>%
+  tabyl(Q3) %>%                 # gives Q3 + n
+  adorn_totals("row") %>%       # adds Total row
+  mutate(
+    percent = n / n_valid_q3,   # keep counts in `n`, compute percent separately
+    percent = percent(percent, accuracy = 0.1)  # format, e.g., "61.2%"
+  )
+
+q3_summary
+
+# Display as a formatted table
+kable(q3_summary, caption = "Q3: Student Sex - Counts and Percentages") %>%
+  kable_styling(full_width = FALSE, position = "center", font_size = 13)
+##
+
+# Optional bar plot
+ggplot(student_data_filtered %>% filter(!is.na(Q3)), aes(x = Q3)) +
+  geom_bar(fill = "#48C9B0", color = "gray30", width = 0.7) +
+   coord_flip()+
+  geom_text(stat = "count", aes(label = ..count..), vjust = 1, fontface = "bold") +
+  labs(
+    title = "Student Sex",
+    x = NULL, y = "Count"
+  ) +
+  theme_publication() +
+  theme(
+    axis.text.x = element_text(face = "bold"),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+
+```
+
+## major
+```{r, warning=FALSE, message=FALSE}
+# ---- 2) Q4 Summary (e.g., Major, Class Level, or Other Demographic) ----
+q4_summary <- student_data_filtered %>%
+  filter(!is.na(Q4)) %>%
+  tabyl(Q4) %>%
+  adorn_totals("row") %>%
+  adorn_percentages("col") %>%
+  adorn_pct_formatting(digits = 3)
+
+# ---- 1) Clean and consolidate major names ----
+cleaned_majors <- student_data_filtered %>%
+  filter(!is.na(Q4)) %>%
+  mutate(
+    major_clean = str_to_lower(Q4),  # make lowercase
+    major_clean = str_squish(major_clean),  # remove double spaces
+
+    # Consolidate common variations
+    major_group = case_when(
+      str_detect(major_clean, "stat") |
+      str_detect(major_clean, "data") |
+      str_detect(major_clean, "analytic") ~ "Statistics & Data Science",
+
+      str_detect(major_clean, "computer") |
+      str_detect(major_clean, "cs") |
+      str_detect(major_clean, "software") ~ "Computer Science / IT",
+
+      str_detect(major_clean, "engineer") ~ "Engineering (All Types)",
+
+      str_detect(major_clean, "math") ~ "Mathematics",
+
+      str_detect(major_clean, "bio") |
+      str_detect(major_clean, "life") |
+      str_detect(major_clean, "chem") |
+      str_detect(major_clean, "enviro") ~ "Biological / Physical Sciences",
+
+      str_detect(major_clean, "business") |
+      str_detect(major_clean, "finance") |
+      str_detect(major_clean, "account") |
+      str_detect(major_clean, "econ") ~ "Business / Economics",
+
+      str_detect(major_clean, "psych") ~ "Psychology",
+      str_detect(major_clean, "edu") ~ "Education",
+      str_detect(major_clean, "nurs") | str_detect(major_clean, "health") ~ "Health Sciences",
+
+      TRUE ~ "Other / Undeclared"
+    )
+  )
+
+# ---- 2) Summarize counts and percentages ----
+major_summary <- cleaned_majors %>%
+  count(major_group, name = "Count") %>%
+  mutate(
+    Percent = Count / sum(Count),
+    Percent_Label = paste0(round(Percent * 100, 1), "%")
+  ) %>%
+  arrange(desc(Count))
+
+# ---- 3) Clean, publication-ready table ----
+kable(
+  major_summary,
+  caption = "Q4: Student Majors (Consolidated Categories)",
+  col.names = c("Major Category", "Count", "Percent", "Percent Label"),
+  digits = 1,
+  align = "lccr"
+) %>%
+  kable_styling(full_width = FALSE, position = "center", font_size = 12)
+
+# ---- 4) Optional: Horizontal bar chart ----
+ggplot(major_summary, aes(y = fct_reorder(major_group, Count), x = Count)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+  geom_text(aes(label = paste0(Count, " (", round(Percent * 100, 1), "%)")),
+            hjust = -0.1, fontface = "bold", size = 3.6, color = "black") +
+  labs(
+    title = "Q4: Student Majors (Consolidated Categories)",
+    x = "Number of Students",
+    y = "Major Category"
+  ) +
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 35, 15)
+  )
+
+# ---- 5) (Optional) Save the figure ----
+ggsave(
+  filename = "Student_figures/Q4_student_majors_consolidated.png",
+  dpi = 600,
+  width = 9.5,
+  height = 5.5,
+  units = "in"
+)
+
+```
+
+## Demographics table Q3-6
+```{r, warning=FALSE, message=FALSE}
+## Demographics table Q3-6
+
+
+student_data_filtered <- student_data_filtered %>%
+  mutate(
+    Q5 = factor(Q5, levels = c("Freshman", "Sophomore", "Junior", "Senior", "Graduate Student")))
+
+
+# 4) Q5 summary now includes former NAs as "Graduate"
+student_data_filtered %>% tabyl(Q5)
+
+# 5) Q5 bar chart (no NA filter needed; includes "Graduate")
+student_data_filtered %>%
+  count(Q5) %>%
+  ggplot(aes(x = Q5, y = n)) +
+  geom_bar(stat = "identity", fill = "#48C9B0") +
+  ggtitle("What is your classification?") +
+  labs(x = "Classification", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+## Q6
+```{R}
+# ---- 1) Define ordered factor levels ----
+student_data_filtered$Q6 <- factor(
+  student_data_filtered$Q6,
+  levels = c("Never", "Rarely", "Sometimes", "Often", "Very Often")
+)
+
+# ---- 2) Compute frequencies and percentages ----
+plot_df_q6 <- student_data_filtered %>%
+  filter(!is.na(Q6)) %>%
+  count(Q6) %>%
+  mutate(Percent = n / sum(n))
+
+# ---- 3) Horizontal bar chart with publication theme ----
+p_q6 <- ggplot(plot_df_q6, aes(y = fct_reorder(Q6, Percent), x = Percent)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline percentage labels
+  geom_text(
+    aes(label = paste0(round(Percent * 100, 1), "%")),
+    hjust = -0.15, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_df_q6$Percent) + 0.08),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles and labels
+  labs(
+    title = "Q6: Frequency of Using AI Technologies in Data Science Work",
+    subtitle = "Includes tools such as ChatGPT, Copilot, and Google Colab",
+    x = "Percentage of Respondents",
+    y = "Frequency",
+    caption = "Note: Percentages calculated from valid (non-missing) responses."
+  ) +
+
+  # Apply unified publication theme
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+# ---- 4) Save as high-resolution PNG ----
+ggsave(
+  filename = "Student_figures/Q6_ai_usage_frequency_horizontal.png",
+  plot = p_q6,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+print(p_q6)
+
+```
+
+## Q7 ## percnetage of all mentions in responses
+```{r}
+## student_data_filtered %>% tabyl(Q7)
+## needs wrangling cuz we allowed multiple responses
+# Step 1: Split comma-separated responses into rows
+long_Q7 <- student_data_filtered %>%
+  select(Q7) %>%
+  filter(!is.na(Q7)) %>%  ## remove NAs
+  mutate(Q7 = str_split(Q7, ",")) %>%
+  unnest(Q7)
+
+# Step 2: Clean up whitespace
+long_Q7 <- long_Q7 %>%
+  mutate(Q7 = str_trim(Q7))
+
+# Step 3: Count frequencies
+Q7_summary <- long_Q7 %>%
+  count(Q7, sort = TRUE) %>%
+  rename(Response = Q7, Frequency = n)
+# View summary
+print(Q7_summary)
+
+## Frequency of use case as percent of 82 responses
+# Step 3: Count frequencies and compute relative frequencies by total respondents (82)
+Q7_summary2 <- long_Q7 %>%
+  count(Q7, sort = TRUE) %>%
+  rename(Response = Q7, Frequency = n) %>%
+  mutate(Relative_Freq = round(Frequency / 120*100, digits=1))
+
+# View summary
+print(Q7_summary2)
+
+
+```
+
+## Q7 Percents based on valid responses
+```{r}
+# ---- 1) Split and clean comma-separated responses ----
+long_Q7 <- student_data_filtered %>%
+  select(Q7) %>%
+  filter(!is.na(Q7)) %>%
+  mutate(Q7 = str_split(Q7, ",")) %>%
+  unnest(Q7) %>%
+  mutate(Q7 = str_trim(Q7))
+
+# ---- 2) Count responses and compute percent based on valid respondents ----
+n_valid <- nrow(student_data_filtered %>% filter(!is.na(Q7)))
+
+Q7_summary <- long_Q7 %>%
+  count(Q7, sort = TRUE) %>%
+  rename(Response = Q7, Count = n) %>%
+  mutate(
+    Percent = Count / n_valid,
+    Label = paste0(Count, " (", round(Percent * 100, 1), "%)")
+  )
+
+# ---- 3) Horizontal bar chart with counts + percentages ----
+p_q7 <- ggplot(Q7_summary, aes(
+  y = fct_reorder(Response, Percent),
+  x = Percent
+)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline labels showing count and percent
+  geom_text(
+    aes(label = Label),
+    hjust = -0.1, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(Q7_summary$Percent) + 0.1),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles and labels
+  labs(
+    title = "Q7: Common Use Cases for AI Tools in Data Science Tasks",
+    subtitle = "Multiple selections allowed; percentages based on valid respondents",
+    x = "Percentage of Respondents Selecting Each Use Case",
+    y = "Use Case",
+    caption = paste0("n = ", n_valid,
+                     " respondents (percentages may exceed 100% because multiple choices were allowed).")
+  ) +
+
+  # Minimal publication-style theme
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    plot.caption = element_text(size = 9),
+    plot.margin = margin(10, 25, 25, 15)
+  )
+
+# Display chart
+p_q7
+
+```
+
+## Q8: Are you interested in pursuing a degree in data science in the future?
+```{r}
+# ---- 1) Define ordered factor levels ----
+student_data_filtered$Q8 <- factor(
+  student_data_filtered$Q8,
+  levels = c("Yes", "No", "Not sure")
+)
+
+# ---- 2) Compute frequencies and percentages ----
+plot_df_q8 <- student_data_filtered %>%
+  filter(!is.na(Q8)) %>%
+  count(Q8) %>%
+  mutate(Percent = n / sum(n))
+
+# ---- 3) Horizontal bar chart (publication theme) ----
+p_q8 <- ggplot(plot_df_q8, aes(y = fct_reorder(Q8, Percent), x = Percent)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline percentage labels
+  geom_text(
+    aes(label = paste0(round(Percent * 100, 1), "%")),
+    hjust = -0.15, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_df_q8$Percent) + 0.08),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles and labels
+  labs(
+    title = "Q8: Interest in Pursuing a Degree in Data Science",
+    subtitle = "Responses show future interest in formal data science education",
+    x = "Percentage of Respondents",
+    y = "Response",
+    caption = "Note: Percentages calculated from valid (non-missing) responses."
+  ) +
+
+  # Unified publication theme
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+# ---- 4) Save as high-resolution PNG ----
+ggsave(
+  filename = "Student_figures/Q8_interest_in_ds_degree_horizontal.png",
+  plot = p_q8,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+print(p_q8)
+
+
+```
+
+## Q9: Are you interested in getting a job in data science in the future?
+
+```{r}
+# ---- 1) Define response order ----
+student_data_filtered$Q9 <- factor(
+  student_data_filtered$Q9,
+  levels = c("Yes", "No", "Not sure")
+)
+
+# ---- 2) Compute frequencies and percentages ----
+plot_df_q9 <- student_data_filtered %>%
+  filter(!is.na(Q9)) %>%
+  count(Q9) %>%
+  mutate(Percent = n / sum(n))
+
+# ---- 3) Horizontal bar chart with publication theme ----
+p_q9 <- ggplot(plot_df_q9, aes(y = fct_reorder(Q9, Percent), x = Percent)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline percentage labels
+  geom_text(
+    aes(label = paste0(round(Percent * 100, 1), "%")),
+    hjust = -0.15, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_df_q9$Percent) + 0.08),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles and captions
+  labs(
+    title = "Q9: Interest in Future Careers in Data Science",
+    subtitle = "Responses show majority interest in pursuing data science roles",
+    x = "Percentage of Respondents",
+    y = "Response",
+    caption = "Note: Percentages based on valid (non-missing) responses."
+  ) +
+
+  # Unified publication theme
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+# ---- 4) Save as PNG ----
+ggsave(
+  filename = "Student_figures/Q9_interest_in_ds_career_horizontal.png",
+  plot = p_q9,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+print(p_q9)
+
+```
+
+## Q10: How familiar are you with the following AI technologies in data science?
+
+```{r}
+# Shared Levels and Palette
+levels_q10 <- c("Not at All Familiar", "Not Very Familiar", "Neutral", "Somewhat Familiar", "Very Familiar")
+
+familiarity_palette <- c(
+  "Not at All Familiar" = "#B2182B",
+  "Not Very Familiar"   = "#E67E22",
+  "Neutral"             = "#F1C40F",
+  "Somewhat Familiar"   = "#48C9B0",
+  "Very Familiar"       = "#117A65"
+)
+#Labels and Levels
+tech_map <- c(
+  Q10_1 = "ChatGPT",
+  Q10_2 = "Gemini",
+  Q10_3 = "Google Colab",
+  Q10_4 = "AI-powered\ndata visualization tools",
+  Q10_5 = "AI-driven\nanalytics platforms"
+)
+
+# Data Preparation
+
+df_long_q10 <- student_data_filtered %>%
+  pivot_longer(starts_with("Q10_"), names_to = "Item", values_to = "Response") %>%
+  mutate(
+    Technology = recode(Item, !!!tech_map, .default = NA_character_),
+    Response   = factor(Response, levels = levels_q10)
+  ) %>%
+  filter(!is.na(Response), !is.na(Technology))
+
+plot_df_q10 <- df_long_q10 %>%
+  count(Technology, Response, .drop = FALSE) %>%
+  group_by(Technology) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup() %>%
+  group_by(Technology) %>%
+  mutate(pct_familiar = sum(pct[Response %in% c("Somewhat Familiar", "Very Familiar")], na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Technology = fct_reorder(Technology, pct_familiar, .desc = TRUE))
+
+
+p_q10 <- ggplot(plot_df_q10, aes(y = Technology, x = pct, fill = Response)) +
+  geom_bar(stat = "identity", color = "gray30", width = 0.7) +
+  geom_text(
+    aes(label = ifelse(pct > 0.04, paste0(round(pct * 100), "%"), "")),
+    position = position_stack(vjust = 0.5),
+    color = "black", size = 3, fontface = "bold"
+  ) +
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(values = familiarity_palette, guide = guide_legend(reverse = TRUE)) +
+  labs(
+    title = "Q10: Student Familiarity with AI Technologies in Data Science",
+    subtitle = "Responses grouped by self-reported familiarity level",
+    x = "Percentage of Responses",
+    y = "AI Technology",
+    fill = "Response",
+    caption = "Note: Percentages represent the proportion of responses within each technology category."
+  ) +
+  theme_publication()
+
+
+print(p_q10)
+ggsave(
+  filename = "Student_figures/Q10_familiarity_horizontal_fxd.png",
+  plot = p_q10,
+  dpi = 700,
+  width = 9.5,
+  height = 6.5,  # slightly taller for legend space
+  units = "in"
+)
+
+
+```
+
+## Q11: Which AI tools have you used in your data science tasks? (Select all that apply) - Selected Choice
+
+```{R}
+#Define the exact expected options (based on your survey config)
+Q11_options <- c(
+  "ChatGPT",
+  "Grammarly",
+  "Claude and Copilot",
+  "AI-powered visualization tools",
+  "Copilot",
+  "Gemini",
+  "Canva or AI assisted presentation tools",
+  "Predictive analytics tools (e.g.DataRobot)",
+  "None",
+  "Others please specify"
+)
+
+#Extract responses and clean
+long_Q11 <- student_data_filtered %>%
+  select(Q11) %>%
+  filter(!is.na(Q11))
+
+#Create a binary indicator for each known option
+for (opt in Q11_options) {
+  long_Q11[[opt]] <- str_detect(long_Q11$Q11, fixed(opt))
+}
+
+#Convert wide to long and count
+Q11_summary <- long_Q11 %>%
+  pivot_longer(cols = all_of(Q11_options), names_to =   "Response", values_to = "Selected") %>%
+  filter(Selected) %>%
+  count(Response, sort = TRUE)
+
+print(Q11_summary)
+
+## With Percents
+Q11_summary2 <- long_Q11 %>%
+  count(Q11, sort = TRUE) %>%
+  rename(Response = Q11, Frequency = n) %>%
+  mutate(Relative_Freq = round(Frequency / 120*100, digits=1))
+
+# summary
+print(Q11_summary2)
+```
+
+```{r}
+# Define expected options
+Q11_options <- c(
+  "ChatGPT",
+  "Grammarly",
+  "Claude and Copilot",
+  "AI-powered visualization tools",
+  "Copilot",
+  "Gemini",
+  "Canva or AI assisted presentation tools",
+  "Predictive analytics tools (e.g.DataRobot)",
+  "None",
+  "Others please specify"
+)
+
+#Extract and clean responses
+long_Q11 <- student_data_filtered %>%
+  select(Q11) %>%
+  filter(!is.na(Q11))
+
+#Create binary indicators for each tool
+for (opt in Q11_options) {
+  long_Q11[[opt]] <- str_detect(long_Q11$Q11, fixed(opt))
+}
+
+# Convert wide → long and summarize
+Q11_summary <- long_Q11 %>%
+  pivot_longer(
+    cols = all_of(Q11_options),
+    names_to = "Tool",
+    values_to = "Selected"
+  ) %>%
+  filter(Selected) %>%
+  count(Tool, name = "Count") %>%
+  mutate(Percent = Count / 120)
+
+# Polished horizontal bar chart
+p_q11 <- ggplot(Q11_summary, aes(y = fct_reorder(Tool, Percent), x = Percent)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline percentage labels
+  geom_text(
+    aes(label = paste0(round(Percent * 100, 1), "%")),
+    hjust = -0.15, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis settings
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(Q11_summary$Percent) + 0.08),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles and captions
+  labs(
+    title = "Q11: AI Tools Used in Data Science Tasks",
+    subtitle = "Multiple selections allowed; shows percentage of respondents selecting each tool",
+    x = "Percentage of Respondents",
+    y = "AI Tool",
+    caption = "Note: Percentages calculated from valid responses."
+  ) +
+
+  # Apply your publication theme
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+# Save as PNG
+ggsave(
+  filename = "Student_figures/Q11_ai_tools_used_horizontal.png",
+  plot = p_q11,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+print(p_q11)
+
+```
+
+## Q12_1: To what extent do you agree with the following statements regarding AI tools in data science?
+
+```{r}
+# Map Q12_
+statement_map <- c(
+  Q12_1 = "AI tools enhance \naccuracy",
+  Q12_2 = "AI tools automate \nprocessing",
+  Q12_3 = "AI tools provide \nnew insights",
+  Q12_4 = "AI tools lack \nemotional intelligence"
+)
+
+# Long format + recode
+df_long_q12 <- student_data_filtered %>%
+  pivot_longer(
+    cols = starts_with("Q12_"),
+    names_to = "Item",
+    values_to = "Response"
+  ) %>%
+  mutate(
+    Statement = dplyr::recode(Item, !!!statement_map, .default = NA_character_),
+    Response = factor(
+      Response,
+      levels = c("Strongly Disagree", "Disagree", "Neutral", "Agree", "Strongly Agree")
+    )
+  ) %>%
+  filter(!is.na(Response), !is.na(Statement))
+
+# Compute proportions per statement
+plot_df_q12 <- df_long_q12 %>%
+  count(Statement, Response, .drop = FALSE) %>%
+  group_by(Statement) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup()
+
+#  Order statements by % favorable (Agree + Strongly Agree)
+plot_df_q12 <- plot_df_q12 %>%
+  group_by(Statement) %>%
+  mutate(pct_fav = sum(pct[Response %in% c("Agree", "Strongly Agree")], na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Statement = fct_reorder(Statement, pct_fav, .desc = TRUE))
+
+#Custom palette
+pal_q12 <- c(
+  "Strongly Disagree" = "#B2182B",
+  "Disagree"          = "#E67E22",
+  "Neutral"           = "#F1C40F",
+  "Agree"             = "#48C9B0",
+  "Strongly Agree"    = "#117A65"
+)
+
+# Horizontal stacked proportion bar chart
+p_q12 <- ggplot(plot_df_q12, aes(y = Statement, x = pct, fill = Response)) +
+  geom_bar(stat = "identity", color = "gray30", width = 0.7) +
+
+  # Optional percentage labels
+  geom_text(
+    aes(label = ifelse(pct > 0.04, paste0(round(pct * 100), "%"), "")),
+    position = position_stack(vjust = 0.5),
+    color = "black", size = 3, fontface = "bold"
+  ) +
+
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(values = pal_q12, guide = guide_legend(reverse = TRUE)) +
+
+  labs(
+    title = "Q12: Attitudes Toward AI Tools in Data Science",
+    subtitle = "Responses grouped by agreement level",
+    x = "Percentage of Responses",
+    y = "Statement",
+    fill = "Response",
+    caption = "Note: Percentages represent the proportion of responses within each statement."
+  ) +
+
+  # saved publication theme
+  theme_publication()
+
+# High-Resolution Figure
+ggsave(
+  filename = "Student_figures/Q12_attitudes_horizontal_pub.pdf",
+  plot = p_q12,
+  dpi = 600,
+  width = 9,
+  height = 6,
+  units = "in"
+)
+
+print(p_q12)
+
+
+```
+
+## Q13: “How often do you use AI tools for the following data science tasks? (Never, Rarely, Sometimes, Often, Always)”
+
+```{r}
+
+# Map Q13_*
+task_map <- c(
+  Q13_1 = "Exploratory data analysis",
+  Q13_2 = "Predictive modeling",
+  Q13_3 = "Data visualization",
+  Q13_4 = "Automating data cleaning tasks",
+  Q13_5 = "Presenting findings and reports"
+)
+
+# Define levels + consistent palette
+levels_q13 <- c("Never", "Rarely", "Sometimes", "Often", "Always")
+pal_q13 <- c(
+  "Never"     = "#B2182B",  # red
+  "Rarely"    = "#E67E22",  # orange
+  "Sometimes" = "#F1C40F",  # gold
+  "Often"     = "#48C9B0",  # turquoise
+  "Always"    = "#117A65"   # teal green
+)
+
+#Reshape and clean
+df_long_q13 <- student_data_filtered %>%
+  pivot_longer(
+    cols = starts_with("Q13_"),
+    names_to = "Item",
+    values_to = "Response"
+  ) %>%
+  mutate(
+    Task     = recode(Item, !!!task_map, .default = NA_character_),
+    Response = factor(Response, levels = levels_q13)
+  ) %>%
+  filter(!is.na(Response), !is.na(Task))
+
+# Calculate proportions
+plot_df_q13 <- df_long_q13 %>%
+  count(Task, Response, .drop = FALSE) %>%
+  group_by(Task) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup()
+
+#Order tasks by % high use
+plot_df_q13 <- plot_df_q13 %>%
+  group_by(Task) %>%
+  mutate(pct_high = sum(pct[Response %in% c("Often", "Always")], na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Task = fct_reorder(Task, pct_high, .desc = TRUE))
+
+# Horizontal stacked bar chart
+p_q13 <- ggplot(plot_df_q13, aes(y = Task, x = pct, fill = Response)) +
+  geom_bar(stat = "identity", color = "gray30", width = 0.7) +
+
+  # Optional: add centered % labels inside bars
+  geom_text(
+    aes(label = ifelse(pct > 0.04, paste0(round(pct * 100), "%"), "")),
+    position = position_stack(vjust = 0.5),
+    color = "black", size = 3, fontface = "bold"
+  ) +
+
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  scale_fill_manual(values = pal_q13, guide = guide_legend(reverse = TRUE)) +
+
+  labs(
+    title = "Q13: How often do you use AI tools for data science tasks?",
+    subtitle = "Responses grouped by frequency of use",
+    x = "Percentage of Responses",
+    y = "Task",
+    fill = "Response",
+    caption = "Note: Percentages represent the proportion of responses within each task."
+  ) +
+
+  #publication theme
+  theme_publication()
+
+# high-resolution figure
+ggsave(
+  filename = "Student_figures/Q13_utilization_horizontal_pub.pdf",
+  plot = p_q13,
+  dpi = 600,
+  width = 9,
+  height = 6,
+  units = "in"
+)
+
+print(p_q13)
+
+
+```
+
+## Q14: How confident are you in explaining AI-generated outputs for data analysis tasks to peers or supervisors?
+
+```{r}
+student_data_filtered$Q14 <- factor(student_data_filtered$Q14,
+  levels = c("Very Confident", "Confident", "Neutral",
+             "Not Very Confident", "Not at All Confident"))
+
+# Frequency table
+student_data_filtered %>%
+  filter(!is.na(Q14)) %>%
+  tabyl(Q14)
+
+
+```
+
+```{r}
+# Factor order and consistent color palette
+conf_levels <- c(
+  "Not at All Confident",
+  "Not Very Confident",
+  "Neutral",
+  "Confident",
+  "Very Confident"
+)
+
+conf_colors <- c(
+  "Not at All Confident" = "#B2182B",
+  "Not Very Confident"   = "#E67E22",
+  "Neutral"              = "#F1C40F",
+  "Confident"            = "#48C9B0",
+  "Very Confident"       = "#117A65"
+)
+
+
+plot_df_q14 <- student_data_filtered %>%
+  filter(!is.na(Q14)) %>%
+  mutate(Response = factor(Q14, levels = conf_levels)) %>%
+  count(Response, .drop = FALSE) %>%
+  mutate(
+    pct   = n / sum(n),
+    label = scales::percent(pct, accuracy = 0.1)
+  )
+
+
+p_q14 <- ggplot(plot_df_q14,
+                aes(y = "Confidence in \nExplaining AI Outputs", x = pct, fill = Response)) +
+  geom_col(width = 0.6, color = "gray30") +
+
+  # Percent labels inside segments (only for larger segments)
+  geom_text(
+    aes(label = ifelse(pct >= 0.03, label, "")),
+    position = position_stack(vjust = 0.5),
+    size = 3, fontface = "bold", color = "black"
+  ) +
+
+  # X-axis in percentage format
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+
+  scale_fill_manual(values = conf_colors, guide = guide_legend(reverse = TRUE)) +
+
+  # Titles, labels, caption
+  labs(
+    title = "Q14: Ability to Explain AI-Generated Outputs",
+    subtitle = "Student self-reported confidence level",
+    x = "Percentage of Responses",
+    y = NULL,
+    fill = "Response",
+#    caption = "Note: Percentages represent the proportion of respondents selecting each confidence level."
+  ) +
+
+  theme_publication()
+
+# high-resolution figure
+ggsave(
+  filename = "Student_figures/Q14_explainability_horizontal_pub.pdf",
+  plot = p_q14,
+  dpi = 600,
+  width = 8.5,
+  height = 4.5,
+  units = "in"
+)
+
+print(p_q14)
+
+```
+
+## Q15: To what extent do you agree with the following statements regarding the future of AI in data science? (Strongly Disagree, Disagree, Neutral, Agree, Strongly Agree)
+
+```{r}
+#  map and consistent palette
+statement_map_q15 <- c(
+  Q15_1 = "AI tools essential \nfor future workflows",
+  Q15_2 = "AI improves efficiency \nin large datasets",
+  Q15_3 = "AI makes DS accessible \nto non-technical professionals",
+  Q15_4 = "Overreliance on AI \nmay diminish skills"
+)
+
+levels_q15 <- c("Strongly Disagree", "Disagree", "Neutral", "Agree", "Strongly Agree")
+pal_q15 <- c(
+  "Strongly Disagree" = "#B2182B",
+  "Disagree"          = "#E67E22",
+  "Neutral"           = "#F1C40F",
+  "Agree"             = "#48C9B0",
+  "Strongly Agree"    = "#117A65"
+)
+
+# Reshape and clean
+df_long_q15 <- student_data_filtered %>%
+  pivot_longer(
+    cols = starts_with("Q15_"),
+    names_to = "Item",
+    values_to = "Response"
+  ) %>%
+  mutate(
+    Statement = recode(Item, !!!statement_map_q15, .default = NA_character_),
+    Response  = factor(Response, levels = levels_q15)
+  ) %>%
+  filter(!is.na(Response), !is.na(Statement))
+
+# Calculate proportions
+plot_df_q15 <- df_long_q15 %>%
+  count(Statement, Response, .drop = FALSE) %>%
+  group_by(Statement) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup() %>%
+  group_by(Statement) %>%
+  mutate(pct_agree = sum(pct[Response %in% c("Agree", "Strongly Agree")], na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Statement = fct_reorder(Statement, pct_agree, .desc = TRUE))
+
+
+p_q15 <- ggplot(plot_df_q15, aes(y = Statement, x = pct, fill = Response)) +
+  geom_bar(stat = "identity", color = "gray30", width = 0.7) +
+
+
+  geom_text(
+    aes(label = ifelse(pct > 0.04, paste0(round(pct * 100), "%"), "")),
+    position = position_stack(vjust = 0.5),
+    color = "black", size = 3, fontface = "bold"
+  ) +
+
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(values = pal_q15, guide = guide_legend(reverse = TRUE)) +
+
+  labs(
+    title = "Q15: Attitudes about the Future of AI in Data Science",
+    subtitle = "Responses grouped by agreement level",
+    x = "Percentage of Responses",
+    y = "Statement",
+    fill = "Response",
+    caption = "Note: Percentages represent the proportion of responses within each statement."
+  ) +
+
+  # publication theme
+  theme_publication()
+
+# high-resolution PNG
+ggsave(
+  filename = "Student_figures/Q15_attitudes_horizontal_pub.png",
+  plot = p_q15,
+  dpi = 600,
+  width = 9,
+  height = 6,
+  units = "in"
+)
+
+print(p_q15)
+
+
+```
+
+## Q16: Do you think students should learn how to use AI tools for their data science careers?
+
+```{r}
+# Define ordered factor levels
+student_data_filtered$Q16 <- factor(student_data_filtered$Q16,
+  levels = c(
+    "Yes, it's essential",
+    "Yes, but not a priority",
+    "Neutral",
+    "No, it's not necessary",
+    "No, it may even be harmful"
+  )
+)
+
+# Compute frequencies and percentages
+plot_df_q16 <- student_data_filtered %>%
+  filter(!is.na(Q16)) %>%
+  count(Q16) %>%
+  mutate(Percent = n / sum(n))
+
+# Horizontal bar chart (publication style)
+p_q16 <- ggplot(plot_df_q16, aes(y = fct_reorder(Q16, Percent), x = Percent)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline percentage labels
+  geom_text(
+    aes(label = paste0(round(Percent * 100, 1), "%")),
+    hjust = -0.15, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_df_q16$Percent) + 0.08),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles and captions
+  labs(
+    title = "Q16: Should Students Learn AI Tools for Their Data Science Careers?",
+    subtitle = "Responses indicate strong support for AI tool proficiency in DS education",
+    x = "Percentage of Respondents",
+    y = "Response",
+    caption = "Note: Percentages calculated from valid (non-missing) responses."
+  ) +
+
+  # Unified publication theme
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+# high-resolution PNG
+ggsave(
+  filename = "Student_figures/Q16_ai_learning_importance_horizontal.png",
+  plot = p_q16,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+print(p_q16)
+
+```
+
+## Q17: To what extent do you agree with the following statement: I am willing to incorporate AI tools more into my data science projects in the future.
+
+```{r}
+#Define factor order
+student_data_filtered$Q17 <- factor(student_data_filtered$Q17,
+  levels = c("Strongly Agree", "Agree", "Neutral", "Disagree", "Strongly Disagree")
+)
+
+# Compute frequency and percentages
+plot_df_q17 <- student_data_filtered %>%
+  filter(!is.na(Q17)) %>%
+  count(Q17) %>%
+  mutate(Percent = n / sum(n))
+
+#Horizontal bar chart
+p_q17 <- ggplot(plot_df_q17, aes(y = fct_reorder(Q17, Percent), x = Percent)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline percentage labels
+  geom_text(
+    aes(label = paste0(round(Percent * 100, 1), "%")),
+    hjust = -0.15, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_df_q17$Percent) + 0.08),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles and labels
+  labs(
+    title = "Q17: Willingness to Incorporate AI Tools in Future Data Science Projects",
+    subtitle = "Responses ordered by level of agreement",
+    x = "Percentage of Respondents",
+    y = "Response",
+    caption = "Note: Percentages calculated from valid responses."
+  ) +
+
+  # Apply your shared publication theme
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+# high-resolution PNG
+ggsave(
+  filename = "Student_figures/Q17_integration_horizontal.png",
+  plot = p_q17,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+print(p_q17)
+
+```
+
+## Q18: To what extent are you aware of the following limitations of using AI for data science tasks?  (Very Aware, Somewhat Aware, Neutral, Not Very Aware, Not at All Aware)
+
+```{r}
+# Define recode map
+limitation_map <- c(
+  Q18_1 = "Biased results",
+  Q18_2 = "Factually incorrect outputs",
+  Q18_3 = "Lack real-world \nexperience/context",
+  Q18_4 = "Need validation \nby experts",
+  Q18_5 = "Data privacy risks"
+)
+
+# factor levels + consistent palette
+levels_q18 <- c(
+  "Not at All Aware",
+  "Not Very Aware",
+  "Neutral",
+  "Somewhat Aware",
+  "Very Aware"
+)
+
+pal_q18 <- c(
+  "Not at All Aware" = "#B2182B",
+  "Not Very Aware"   = "#E67E22",
+  "Neutral"          = "#F1C40F",
+  "Somewhat Aware"   = "#48C9B0",
+  "Very Aware"       = "#117A65"
+)
+
+# Reshape and clean
+df_long_q18 <- student_data_filtered %>%
+  pivot_longer(
+    cols = starts_with("Q18_"),
+    names_to = "Item",
+    values_to = "Response"
+  ) %>%
+  mutate(
+    Limitation = recode(Item, !!!limitation_map, .default = NA_character_),
+    Response   = factor(Response, levels = levels_q18)
+  ) %>%
+  filter(!is.na(Response), !is.na(Limitation))
+
+#Calculate proportions
+plot_df_q18 <- df_long_q18 %>%
+  count(Limitation, Response, .drop = FALSE) %>%
+  group_by(Limitation) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup()
+
+#Order by % high awareness
+plot_df_q18 <- plot_df_q18 %>%
+  group_by(Limitation) %>%
+  mutate(pct_high = sum(pct[Response %in% c("Somewhat Aware","Very Aware")], na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Limitation = fct_reorder(Limitation, pct_high, .desc = TRUE))
+
+# Horizontal stacked bar chart
+p_q18 <- ggplot(plot_df_q18, aes(y = Limitation, x = pct, fill = Response)) +
+  geom_bar(stat = "identity", color = "gray30", width = 0.7) +
+
+  # Optional percentage labels
+  geom_text(
+    aes(label = ifelse(pct > 0.04, paste0(round(pct * 100), "%"), "")),
+    position = position_stack(vjust = 0.5),
+    color = "black", size = 3, fontface = "bold"
+  ) +
+
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(values = pal_q18, guide = guide_legend(reverse = TRUE)) +
+
+  labs(
+    title = "Q18: Awareness of AI Limitations in Data Science",
+    subtitle = "Responses grouped by awareness level",
+    x = "Percentage of Responses",
+    y = "AI Limitation",
+    fill = "Response",
+    caption = "Note: Percentages represent the proportion of responses within each limitation category."
+  ) +
+
+  theme_publication()
+
+# high-resolution PNG
+ggsave(
+  filename = "Student_figures/Q18_awareness_horizontal_pub.png",
+  plot = p_q18,
+  dpi = 600,
+  width = 9,
+  height = 6,
+  units = "in"
+)
+
+print(p_q18)
+
+
+```
+
+
+## Q19: What are your primary concerns about using AI tools in data science?
+```{r}
+# Create new variables (binary indicators) for each concern
+student_data_filtered <- student_data_filtered %>% mutate( concern_accuracy = str_detect(Q19, regex("accuracy", ignore_case = TRUE)), concern_transparency = str_detect(Q19, regex("transparency", ignore_case = TRUE)), concern_privacy = str_detect(Q19, regex("privacy", ignore_case = TRUE)), concern_ethics = str_detect(Q19, regex("ethic|bias", ignore_case = TRUE)), concern_skill_loss = str_detect(Q19, regex("skill", ignore_case = TRUE)), concern_understanding = str_detect(Q19, regex("understanding", ignore_case = TRUE)),
+concern_none = str_detect(Q19, regex("don't|none", ignore_case = TRUE)) )
+# Count totals for each concern
+q19_summary <- tibble( Concern = c("Accuracy & Reliability", "Lack of Transparency", "Privacy & Security", "Ethical Concerns (Bias)", "Skill Degradation", "Difficulty Understanding Models", "Don't Know/None"),
+                       Count = c( sum(student_data_filtered$concern_accuracy, na.rm = TRUE), sum(student_data_filtered$concern_transparency, na.rm = TRUE), sum(student_data_filtered$concern_privacy, na.rm = TRUE), sum(student_data_filtered$concern_ethics, na.rm = TRUE), sum(student_data_filtered$concern_skill_loss, na.rm = TRUE), sum(student_data_filtered$concern_understanding, na.rm = TRUE), sum(student_data_filtered$concern_none, na.rm = TRUE) ) )
+# Add percentages
+q19_summary <- q19_summary %>% mutate(Percent = round(Count / 120 * 100, 1))
+
+# ---- 1) Binary indicators already created ----
+# (as in your code)
+(n19 <- sum(!is.na(student_data_filtered$Q19)))
+# ---- 2) Summarize + add percentages ----
+q19_summary <- tibble(
+  Concern = c("Accuracy & Reliability",
+              "Lack of Transparency",
+              "Privacy & Security",
+              "Ethical Concerns (Bias)",
+              "Skill Degradation",
+              "Difficulty Understanding Models",
+              "Don't Know / None"),
+  Count = c(
+    sum(student_data_filtered$concern_accuracy, na.rm = TRUE),
+    sum(student_data_filtered$concern_transparency, na.rm = TRUE),
+    sum(student_data_filtered$concern_privacy, na.rm = TRUE),
+    sum(student_data_filtered$concern_ethics, na.rm = TRUE),
+    sum(student_data_filtered$concern_skill_loss, na.rm = TRUE),
+    sum(student_data_filtered$concern_understanding, na.rm = TRUE),
+    sum(student_data_filtered$concern_none, na.rm = TRUE)
+  )
+) %>%
+  mutate(Percent = Count / n19)
+
+# Polished horizontal bar chart
+p_q19 <- ggplot(q19_summary, aes(y = fct_reorder(Concern, Percent), x = Percent)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline % labels
+  geom_text(
+    aes(label = paste0(round(Percent * 100, 1), "%")),
+    hjust = -0.15, size = 3.6, fontface = "bold", color = "black"
+  ) +
+
+  # Axes formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(q19_summary$Percent) + 0.08),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles and caption
+  labs(
+    title = "Q19: Primary Concerns About Using AI Tools in Data Science",
+    subtitle = "Top issues mentioned by respondents",
+    x = "Percentage of Respondents",
+    y = "Concern",
+    caption = "Note: Percentages calculated from valid (non-missing) responses"
+  ) +
+
+  # Unified publication theme
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+#Save as high-resolution PNG
+ggsave(
+  filename = "Student_figures/Q19_primary_concerns_horizontal.png",
+  plot = p_q19,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+print(p_q19)
+```
+
+## Q20: Have you ever encountered issues such as hallucinations, bias, or inaccuracy while using AI tools for data science tasks?
+
+
+```{r}
+# Define factor order
+student_data_filtered$Q20 <- factor(student_data_filtered$Q20,
+  levels = c(
+    "Yes, frequently",
+    "Yes, occasionally",
+    "No, never",
+    "I never used AI tools for data science"
+  )
+)
+
+# Compute frequency and percentages
+n20 = sum(!is.na(student_data_filtered$Q20))
+plot_df_q20 <- student_data_filtered %>%
+  filter(!is.na(Q20)) %>%
+  count(Q20) %>%
+  mutate(Percent = n / n20)
+
+
+#  Horizontal bar chart
+p_q20 <- ggplot(plot_df_q20, aes(y = fct_reorder(Q20, Percent), x = Percent)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline percent labels
+  geom_text(
+    aes(label = paste0(round(Percent * 100, 1), "%")),
+    hjust = -0.15, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_df_q20$Percent) + 0.08),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles and captions
+  labs(
+    title = "Q20: Encountered Issues with AI Tools in Data Science Tasks",
+    subtitle = "Frequency of reported challenges when using AI tools",
+    x = "Percentage of Respondents",
+    y = "Response",
+    caption = "Note: Percentages calculated from valid (non-missing) responses."
+  ) +
+
+
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+# high-resolution PNG
+ggsave(
+  filename = "Student_figures/Q20_ai_tool_issues_horizontal_pub.png",
+  plot = p_q20,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+print(p_q20)
+
+```
+
+## Q21: Do you think AI tools can significantly enhance the following aspects of your data science workflow?  (Strongly Disagree, Disagree, Neutral, Agree, Strongly Agree)
+
+
+```{r}
+#  Define recode map
+aspect_map_q21 <- c(
+  Q21_1 = "Automating repetitive \ntasks",
+  Q21_2 = "Enhancing predictive \nmodeling accuracy",
+  Q21_3 = "Visualizing \ncomplex datasets",
+  Q21_4 = "Supporting faster \ndecision-making",
+  Q21_5 = "Communicating to \nnon-technical stakeholders"
+)
+
+# ---- 2) Define factor levels + consistent palette ----
+levels_q21 <- c("Strongly Disagree", "Disagree", "Neutral", "Agree", "Strongly Agree")
+pal_q21 <- c(
+  "Strongly Disagree" = "#B2182B",
+  "Disagree"          = "#E67E22",
+  "Neutral"           = "#F1C40F",
+  "Agree"             = "#48C9B0",
+  "Strongly Agree"    = "#117A65"
+)
+
+# Reshape and clean
+df_long_q21 <- student_data_filtered %>%
+  pivot_longer(
+    cols = starts_with("Q21_"),
+    names_to = "Item",
+    values_to = "Response"
+  ) %>%
+  mutate(
+    Aspect = recode(Item, !!!aspect_map_q21, .default = NA_character_),
+    Response = factor(Response, levels = levels_q21)
+  ) %>%
+  filter(!is.na(Response), !is.na(Aspect))
+
+#  Calculate percentages
+plot_df_q21 <- df_long_q21 %>%
+  count(Aspect, Response, name = "n") %>%
+  group_by(Aspect) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup()
+
+# Compute favorable % for sorting
+plot_df_q21 <- plot_df_q21 %>%
+  group_by(Aspect) %>%
+  mutate(pct_fav = sum(pct[Response %in% c("Agree", "Strongly Agree")], na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Aspect = fct_reorder(Aspect, pct_fav, .desc = TRUE))
+
+#  Horizontal stacked bar chart
+p_q21 <- ggplot(plot_df_q21, aes(y = Aspect, x = pct, fill = Response)) +
+  geom_bar(stat = "identity", color = "gray30", width = 0.7) +
+
+  # Inline percentage labels
+  geom_text(
+    aes(label = ifelse(pct > 0.04, paste0(round(pct * 100), "%"), "")),
+    position = position_stack(vjust = 0.5),
+    color = "black", size = 3, fontface = "bold"
+  ) +
+
+  # Format axes
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Apply consistent color palette
+  scale_fill_manual(values = pal_q21, guide = guide_legend(reverse = TRUE)) +
+
+  # Titles and labels
+  labs(
+    title = "Q21: Perceived Enhancement of Data Science Workflow with AI",
+    subtitle = "Responses grouped by agreement level",
+    x = "Percentage of Responses",
+    y = "AI-Augmented Workflow Aspect",
+    fill = "Response",
+    caption = "Note: Percentages represent the proportion of responses within each aspect."
+  ) +
+
+  # Apply publication theme
+  theme_publication()
+
+# high-resolution PNG
+ggsave(
+  filename = "Student_figures/Q21_workflow_enhancement_horizontal_pub.png",
+  plot = p_q21,
+  dpi = 600,
+  width = 9,
+  height = 6,
+  units = "in"
+)
+
+print(p_q21)
+
+
+```
+
+## Q22: What concerns or challenges do you face when integrating AI tools into your data science workflow?
+
+```{r}
+# ---- 1) Create binary indicators for each challenge ----
+student_data_filtered <- student_data_filtered %>%
+  mutate(
+    q22_complexity    = str_detect(Q22, regex("complexity", ignore_case = TRUE)),
+    q22_accuracy      = str_detect(Q22, regex("accuracy", ignore_case = TRUE)),
+    q22_understanding = str_detect(Q22, regex("understanding", ignore_case = TRUE)),
+    q22_privacy       = str_detect(Q22, regex("privacy", ignore_case = TRUE)),
+    q22_jobimpact     = str_detect(Q22, regex("job", ignore_case = TRUE))
+  )
+
+# ---- 2) Summarize counts ----
+q22_summary <- tibble(
+  Concern = c(
+    "Complexity in \nUsing AI Tools",
+    "Accuracy & Reliability \nof Predictions",
+    "Understanding AI Outputs",
+    "Data Security & \nPrivacy Risks",
+    "Impact on \nDS Job Roles"
+  ),
+  Count = c(
+    sum(student_data_filtered$q22_complexity, na.rm = TRUE),
+    sum(student_data_filtered$q22_accuracy, na.rm = TRUE),
+    sum(student_data_filtered$q22_understanding, na.rm = TRUE),
+    sum(student_data_filtered$q22_privacy, na.rm = TRUE),
+    sum(student_data_filtered$q22_jobimpact, na.rm = TRUE)
+  )
+)
+
+# ---- 3) Add percentages ----
+n22 = sum(!is.na(student_data_filtered$Q22))  # update this with your actual N
+q22_summary <- q22_summary %>%
+  #mutate(Percent = Count / total_n)
+mutate(Percent = Count / n22)
+
+# ---- 4) Horizontal bar chart with refined theme ----
+p_q22 <- ggplot(q22_summary, aes(y = fct_reorder(Concern, Percent), x = Percent)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline percent labels
+  geom_text(
+    aes(label = paste0(round(Percent * 100, 1), "%")),
+    hjust = -0.15, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # X-axis formatting
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(q22_summary$Percent) + 0.08),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles & caption
+  labs(
+    title = "Q22: Challenges in Integrating AI Tools into Data Science Workflows",
+    subtitle = "Key challenges identified from open-ended responses",
+    x = "Percentage of Students",
+    y = "Challenge",
+    caption = "Note: Multiple responses were allowed."
+  ) +
+
+  # Apply your publication theme
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+# ---- 5) Save as high-resolution PNG ----
+ggsave(
+  filename = "Student_figures/Q22_challenges_workflow_pub.png",
+  plot = p_q22,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+print(p_q22)
+
+```
+
+## Q23: What concerns do you have about integrating AI tools into education in general?
+
+```{r}
+# binary indicators
+student_data_filtered <- student_data_filtered %>%
+  mutate(
+    q23_undermines_value = str_detect(Q23, regex("undermine|value", ignore_case = TRUE)),
+    q23_limits_social    = str_detect(Q23, regex("interact|social", ignore_case = TRUE)),
+    q23_hinders_skills   = str_detect(Q23, regex("skills|teamwork|problem", ignore_case = TRUE)),
+    q23_overreliance     = str_detect(Q23, regex("over[- ]?reliant", ignore_case = TRUE))
+  )
+
+# Summarize counts
+q23_summary <- tibble(
+  Concern = c(
+    "Undermines Value of \nUniversity Education",
+    "Limits Social \nInteraction",
+    "Hinders Development \nof Transferable Skills",
+    "Over-Reliance on \nGenerative AI"
+  ),
+  Count = c(
+    sum(student_data_filtered$q23_undermines_value, na.rm = TRUE),
+    sum(student_data_filtered$q23_limits_social, na.rm = TRUE),
+    sum(student_data_filtered$q23_hinders_skills, na.rm = TRUE),
+    sum(student_data_filtered$q23_overreliance, na.rm = TRUE)
+  )
+)
+
+#  percentages
+total_n <- 120
+q23_summary <- q23_summary %>%
+  mutate(Percent = Count / total_n)
+
+# ---- 4) Horizontal bar chart with refined styling ----
+p_q23 <- ggplot(q23_summary, aes(y = fct_reorder(Concern, Percent), x = Percent)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+
+  # Inline percentage labels
+  geom_text(
+    aes(label = paste0(round(Percent * 100, 1), "%")),
+    hjust = -0.15, fontface = "bold", size = 3.6, color = "black"
+  ) +
+
+  # Format axes
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(q23_summary$Percent) + 0.08),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+
+  # Titles, labels, caption
+  labs(
+    title = "Q23: Concerns About Integrating AI into Education",
+    subtitle = "Top concerns identified from open-ended responses",
+    x = "Percentage of Students",
+    y = "Concern",
+    caption = "Note: Multiple responses were allowed."
+
+  ) +
+
+  # Apply publication theme
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+#  high-resolution PNG
+ggsave(
+  filename = "Student_figures/Q23_general_concerns_horizontal_pub.png",
+  plot = p_q23,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+print(p_q23)
+
+
+```
+
+## Q24: Do you believe that AI tools should complement traditional methods in data science, or replace them?
+```{r}
+#  Wrap labels
+student_data_filtered$Q24 <- str_wrap(student_data_filtered$Q24, width = 35)
+
+# Tabulate and compute percentages
+plot_df_q24 <- student_data_filtered %>%
+  filter(!is.na(Q24)) %>%
+  count(Q24, name = "n") %>%
+  mutate(pct = n / total_n)
+
+# Horizontal bar chart
+p_q24 <- ggplot(plot_df_q24, aes(y = fct_reorder(Q24, pct), x = pct)) +
+  geom_bar(stat = "identity", fill = "#48C9B0", color = "gray30", width = 0.7) +
+  geom_text(
+    aes(label = percent(pct, accuracy = 0.1)),
+    hjust = -0.15, fontface = "bold", size = 3.6, color = "black"
+  ) +
+  scale_x_continuous(
+    labels = label_percent(accuracy = 1),
+    limits = c(0, max(plot_df_q24$pct) + 0.08),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  labs(
+    title = "Q24: Should AI Tools Complement or Replace Traditional Methods?",
+    subtitle = "Distribution of open-ended responses",
+    x = "Percentage of Valid Responses",
+    y = "Response",
+    caption = "Note: Percentages represent non-missing responses."
+  ) +
+  theme_publication() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10.5, lineheight = 1.1),
+    plot.margin = margin(10, 20, 25, 15)
+  )
+
+# high-resolution PNG
+ggsave(
+  filename = "Student_figures/Q24_complement_or_replace_horizontal_pub.png",
+  plot = p_q24,
+  dpi = 600,
+  width = 8.5,
+  height = 5.5,
+  units = "in"
+)
+
+print(p_q24)
+
+```
+
+#cfa
+
+```{r cfa_data_refresh, message=FALSE, warning=FALSE}
+# Refresh the analysis objects using the same repo-relative loader
+student_data_path <- find_student_file()
+student_import <- load_student_data(student_data_path)
+student_header_preview <- student_import$student_header_preview
+student_data_raw <- student_import$student_data_raw
+student_data_filtered <- student_import$student_data_filtered
+student_header_labels <- student_import$student_header_labels
+
+cat("Remaining sample size after quality filters:", nrow(student_data_filtered), "students\n")
+dim(student_data_filtered)
+```
+
+```{r }
+
+
+questions <- student_data_filtered |>
+  select(
+    starts_with("Q10_"),
+    starts_with("Q12_"),
+    starts_with("Q18_"),
+    starts_with("Q15_"),
+    starts_with("Q21_")
+  ) |>
+  select(
+    Q10_1, Q10_2, Q10_3, Q10_4, Q10_5,
+    Q12_1, Q12_2, Q12_3, Q12_4,
+    Q18_1, Q18_2, Q18_3, Q18_4, Q18_5,
+    Q21_1, Q21_2, Q21_3, Q21_4, Q21_5,
+    Q15_4
+  )
+
+
+missing_summary <- questions |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "Question",
+    values_to = "Response"
+  ) |>
+  group_by(Question) |>
+  summarise(
+  Valid_Responses = sum(!is.na(Response)),
+  Missing_Count = sum(is.na(Response)),
+  Percent_Missing = round(100 * Missing_Count / n(), 2),
+  Percent_Not_Missing = round(100 * Valid_Responses / n(), 2),
+  .groups = "drop"
+)
+
+
+
+
+
+
+
+  missing_summary
+
+```
+
+
+## Familiarity Score Q10
+
+# How familiar are you with the following AI technologies in data science?
+
+
+**CLASS GROUPS AND RECODING **
+
+
+```{r}
+
+# Class Groups
+
+student_data_filtered <- student_data_filtered %>%
+  mutate(
+    Q5 = replace_na(Q5, "Graduate student"),
+    Q5 = factor(Q5, levels = c("Freshman", "Sophomore", "Junior", "Senior", "Graduate student")))
+
+student_data_filtered <- student_data_filtered |>
+  mutate(
+    class_group = case_when(
+      Q5 %in% c("Freshman", "Sophomore") ~ "Lower Division",
+      Q5 %in% c("Junior", "Senior")      ~ "Upper Division",
+      Q5 == "Graduate student"           ~ "Graduate",
+      TRUE                               ~ NA_character_
+    )
+  )
+
+
+student_data_filtered <- student_data_filtered |>
+  mutate(  class_group = factor(class_group, levels = c("Lower Division","Upper Division", "Graduate")))
+
+# Recoding to numeric
+
+
+student_data_filtered <- student_data_filtered |>
+  mutate(Q10_1 =
+           recode(Q10_1,
+                  "Not at All Familiar" = 1,
+                  "Not Very Familiar" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Familiar" = 4,
+                  "Very Familiar" = 5),
+        Q10_2 =
+              recode(Q10_2,
+                "Not at All Familiar" = 1,
+                "Not Very Familiar" = 2,
+                "Neutral" = 3,
+                "Somewhat Familiar" = 4,
+                "Very Familiar" = 5),
+        Q10_3 =
+         recode(Q10_3,
+                  "Not at All Familiar" = 1,
+                  "Not Very Familiar" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Familiar" = 4,
+                  "Very Familiar" = 5),
+         Q10_4 =
+         recode(Q10_4,
+                "Not at All Familiar" = 1,
+                  "Not Very Familiar" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Familiar" = 4,
+                  "Very Familiar" = 5),
+        Q10_5 =
+         recode(Q10_5,
+                "Not at All Familiar" = 1,
+                  "Not Very Familiar" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Familiar" = 4,
+                  "Very Familiar" = 5))
+
+
+head(student_data_filtered)
+
+
+```
+
+
+```{r}
+
+
+student_data_filtered <- student_data_filtered |>
+  rowwise() |>
+  mutate(
+    Q10_comp = ifelse(
+      all(is.na(c_across(Q10_1:Q10_5))),
+      NA_real_,
+      mean(c_across(Q10_1:Q10_5), na.rm = TRUE)
+    )
+  ) |> ungroup()
+
+head(student_data_filtered)
+
+
+```
+
+
+# SUMMARY
+
+
+```{r}
+
+Q10_Sum <- student_data_filtered |>
+  summarise(n = sum(!is.na(Q10_comp)),
+            Min = min(Q10_comp, na.rm = TRUE),
+            Mean = mean(Q10_comp, na.rm = TRUE),
+            SD = sd(Q10_comp, na.rm =TRUE),
+            Max = max(Q10_comp, na.rm = TRUE))
+
+print(Q10_Sum)
+
+
+```
+
+
+# SUMMARY BY GENDER AND CLASS
+
+
+```{r}
+# by gender
+
+student_data_filtered <- student_data_filtered %>%
+  filter(Q3 %in% c("Female", "Male"))
+
+Q10_bygender <- student_data_filtered |>
+  group_by(Q3) |>
+   filter(!is.na(class_group)) |>
+  summarise(n= sum(!is.na(Q10_comp)),
+            Mean = mean(Q10_comp, na.rm = TRUE),
+            SD = sd(Q10_comp, na.rm =TRUE))
+
+print(Q10_bygender)
+
+
+# by class
+
+Q10_class <- student_data_filtered |>
+  group_by(class_group) |>
+  filter(!is.na(class_group)) |>
+  summarise(n= sum(!is.na(Q10_comp)),
+            Mean = mean(Q10_comp, na.rm = TRUE),
+            SD = sd(Q10_comp, na.rm =TRUE))
+
+print(Q10_class)
+
+
+```
+
+# BOXPLOT  FOR CLASS AND GENDER
+
+
+```{r, warning=FALSE, message=FALSE}
+
+student_data_filtered |>
+  ggplot(aes(x = Q3, y = Q10_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = FALSE) +
+  labs(
+    title = "Q10 Composite Score by Gender",
+    x = "Gender",
+    y = "Q10 Composite Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+
+student_data_filtered |>
+  ggplot(aes(x = class_group, y = Q10_comp )) +
+  geom_boxplot(width = 0.6, alpha = 0.8) +
+  labs(
+    title = "Q10 Composite Score by Class Group",
+    x = "Class Group",
+    y = "Q10 Composite Score"
+  )
+
+student_data_filtered |> filter(!is.na(class_group), !is.na(Q10_comp))|>
+ ggplot(aes(x = class_group, y = Q10_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = TRUE) +
+  labs(
+    title = "Q10 Composite Score by Class Group and Gender",
+    x = "Class Group",
+    y = "Q10 Composite Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    legend.position = "bottom"
+  )
+
+
+```
+
+
+## Awareness of limitations Score Q18
+
+
+# Q18 - To what extent are you aware of the following limitations of using AI for data science tasks?
+
+
+```{r}
+
+# Recoding to numeric
+
+
+student_data_filtered <- student_data_filtered |>
+  mutate(Q18_1 =
+           recode(Q18_1,
+                  "Not at All Aware" = 1,
+                  "Not Very Aware" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Aware" = 4,
+                  "Very Aware" = 5),
+        Q18_2 =
+              recode(Q18_2,
+                  "Not at All Aware" = 1,
+                  "Not Very Aware" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Aware" = 4,
+                  "Very Aware" = 5),
+        Q18_3 =
+         recode(Q18_3,
+                  "Not at All Aware" = 1,
+                  "Not Very Aware" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Aware" = 4,
+                  "Very Aware" = 5),
+         Q18_4 =
+         recode(Q18_4,
+                  "Not at All Aware" = 1,
+                  "Not Very Aware" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Aware" = 4,
+                  "Very Aware" = 5),
+        Q18_5 =
+         recode(Q18_5,
+                  "Not at All Aware" = 1,
+                  "Not Very Aware" = 2,
+                  "Neutral" = 3,
+                  "Somewhat Aware" = 4,
+                  "Very Aware" = 5))
+
+
+student_data_filtered <- student_data_filtered |>
+  mutate(Q15_1 =
+           recode(Q15_1,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+        Q15_2 =
+          recode(Q15_2,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+
+        Q15_3 =
+         recode(Q15_3,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+         Q15_4 =    # reverse coding
+         recode(Q15_4,
+                  "Strongly Disagree" = 5,
+                  "Disagree" = 4,
+                  "Neutral" = 3,
+                  "Agree" = 2,
+                  "Strongly Agree" = 1))
+
+
+head(student_data_filtered)
+
+
+```
+
+
+```{r}
+
+
+student_data_filtered <- student_data_filtered |>
+  rowwise() |>
+  mutate(
+    Q18_comp = ifelse(
+      all(is.na(c_across(c(Q18_1:Q18_5)))),
+      NA_real_,
+      mean(c_across(c(Q18_1:Q18_5)), na.rm = TRUE)
+    )
+  ) |>
+  ungroup()
+
+head(student_data_filtered)
+
+
+```
+
+
+# summary
+
+```{r}
+
+Q18_Sum <- student_data_filtered |>
+  summarise(n = sum(!is.na(Q18_comp)),
+            Min = min(Q18_comp, na.rm = TRUE),
+            Mean = mean(Q18_comp, na.rm = TRUE),
+            SD = sd(Q18_comp, na.rm =TRUE),
+            Max = max(Q18_comp, na.rm = TRUE))
+
+print(Q18_Sum)
+
+```
+
+
+# SUMMARY BY GENDER AND CLASS
+
+
+```{r}
+
+# by gender
+
+Q18_bygender <- student_data_filtered |>
+  group_by(Q3) |>
+   filter(!is.na(class_group), !is.na(Q3)) |>
+  summarise(n = sum(!is.na(Q18_comp)),
+            Mean = mean(Q18_comp, na.rm = TRUE),
+            SD = sd(Q18_comp, na.rm =TRUE))
+
+print(Q18_bygender)
+
+
+# by class
+
+Q18_class <- student_data_filtered |>
+  group_by(class_group) |>
+  filter(!is.na(class_group)) |>
+  summarise(n = sum(!is.na(Q18_comp)),
+            Mean = mean(Q18_comp, na.rm = TRUE),
+            SD = sd(Q18_comp, na.rm =TRUE))
+
+print(Q18_class)
+
+
+```
+
+
+# BOXPLOT  FOR CLASS AND GENDER
+
+
+```{r, warning=FALSE,message=FALSE}
+
+student_data_filtered |>
+  ggplot(aes(x = Q3, y = Q18_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = FALSE) +
+  labs(
+    title = "Q18 Composite Score by Gender",
+    x = "Gender",
+    y = "Q18 Composite Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+
+student_data_filtered |>
+  ggplot(aes(x = class_group, y = Q18_comp )) +
+  geom_boxplot(width = 0.6, alpha = 0.8) +
+  labs(
+    title = "Q18 Composite Score by Class Group",
+    x = "Class Group",
+    y = "Q18 Composite Score"
+  )
+
+student_data_filtered |> filter(!is.na(class_group), !is.na(Q18_comp))|>
+ ggplot(aes(x = class_group, y = Q18_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = TRUE) +
+  labs(
+    title = "Q18 Composite Score by Class Group and Gender",
+    x = "Class Group",
+    y = "Q18 Composite Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    legend.position = "bottom"
+  )
+
+
+```
+
+
+## Perceptions Q12 AND Q21
+
+# Q12 - To what extent do you agree with the following statements regarding AI tools in data science?
+
+# Q21 - Do you think AI tools can significantly enhance the following aspects of your data science workflow?
+
+
+# RECODING
+
+
+```{r, warning=FALSE, message= FALSE}
+
+student_data_filtered <- student_data_filtered |>
+  mutate(Q12_1 =
+           recode(Q12_1,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+        Q12_2 =
+          recode(Q12_2,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+
+        Q12_3 =
+         recode(Q12_3,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+         Q12_4 =  # reverse coding
+         recode(Q12_4,
+                  "Strongly Disagree" = 5,
+                  "Disagree" = 4,
+                  "Neutral" = 3,
+                  "Agree" = 2,
+                  "Strongly Agree" = 1))
+
+
+student_data_filtered <- student_data_filtered |>
+  mutate(Q21_1 =
+           recode(Q21_1,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+        Q21_2 =
+              recode(Q21_3,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+        Q21_3 =
+         recode(Q21_3,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+         Q21_4 =
+         recode(Q21_4,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5),
+        Q21_5 =
+         recode(Q21_1,
+                  "Strongly Disagree" = 1,
+                  "Disagree" = 2,
+                  "Neutral" = 3,
+                  "Agree" = 4,
+                  "Strongly Agree" = 5))
+
+
+head(student_data_filtered)
+
+```
+
+
+```{r}
+
+
+student_data_filtered <- student_data_filtered |>
+  rowwise() |>
+  mutate(
+    Qper_comp = ifelse(
+      all(is.na(c_across(c(Q12_1:Q12_2, Q21_1:Q21_2,Q21_4)))),
+      NA_real_,
+      mean(c_across(c(Q12_1:Q12_2, Q21_1:Q21_2,Q21_4)), na.rm = TRUE)
+    )
+  ) |>
+  ungroup()
+
+head(student_data_filtered)
+
+
+```
+
+
+# Summary
+
+
+```{r}
+
+Qper_Sum <- student_data_filtered |>
+  summarise(n = sum(!is.na(Qper_comp)),
+            Min = min(Qper_comp, na.rm = TRUE),
+            Mean = mean(Qper_comp, na.rm = TRUE),
+            SD = sd(Qper_comp, na.rm =TRUE),
+            Max = max(Qper_comp, na.rm = TRUE))
+
+print(Qper_Sum)
+
+```
+
+
+# SUMMARY BY GENDER AND CLASS
+
+```{r}
+
+# by gender
+
+Qper_bygender <- student_data_filtered |>
+  group_by(Q3) |>
+   filter(!is.na(class_group), !is.na(Q3)) |>
+  summarise(n = sum(!is.na(Qper_comp)),
+            Mean = mean(Qper_comp, na.rm = TRUE),
+            SD = sd(Qper_comp, na.rm =TRUE))
+
+print(Qper_bygender)
+
+
+# by class
+
+Qper_class <- student_data_filtered |>
+  group_by(class_group) |>
+  filter(!is.na(class_group)) |>
+  summarise(n = sum(!is.na(Qper_comp)),
+            Mean = mean(Qper_comp, na.rm = TRUE),
+            SD = sd(Qper_comp, na.rm =TRUE))
+
+print(Qper_class)
+
+
+```
+
+
+# BOXPLOT  FOR CLASS AND GENDER
+
+
+```{r, warning=FALSE, message=FALSE}
+
+student_data_filtered |>
+  ggplot(aes(x = Q3, y = Qper_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = FALSE) +
+  labs(
+    title = "Q12 and Q21 Composite Score by Gender",
+    x = "Gender",
+    y = "Q12 and Q21 Composite Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+
+student_data_filtered |>
+  ggplot(aes(x = class_group, y = Qper_comp )) +
+  geom_boxplot(width = 0.6, alpha = 0.8) +
+  labs(
+    title = "Q12 and Q21 Composite Score by Class Group",
+    x = "Class Group",
+    y = "Q12 and Q21 Composite Score"
+  )
+
+student_data_filtered |> filter(!is.na(class_group), !is.na(Qper_comp))|>
+ ggplot(aes(x = class_group, y = Qper_comp, fill = Q3)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, show.legend = TRUE) +
+  labs(
+    title = "Q12 and Q21 Composite Score by Class Group and Gender",
+    x = "Class Group",
+    y = "Q12 and Q21 Composite Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    legend.position = "bottom"
+  )
+
+
+```
+
+
+### Factor Analysis
+
+
+##  EFA AND CFA Familiarity Score Q10
+
+
+# Exploratory Factor Analysis
+
+
+```{r}
+
+Q10_fam <- student_data_filtered |> select(Q10_1:Q10_5) |>
+  na.omit()
+
+factanal(Q10_fam, factors = 1)
+
+
+```
+
+
+## Confirmatory Factor Analysis (CFA)
+
+
+```{r}
+
+Q10_model <- '
+  Q10_factor =~ Q10_1 + Q10_2 + Q10_3 + Q10_4 + Q10_5
+'
+
+
+Q10_CFA <- cfa(model = Q10_model, data = student_data_filtered)
+
+
+summary(Q10_CFA, fit.measures = TRUE, standardized = TRUE)
+
+
+```
+
+```{r}
+
+Alpha <- psych::alpha(student_data_filtered |> dplyr::select(Q10_1:Q10_5))
+
+
+Alpha$total
+
+
+```
+
+```{r}
+
+fam_table  <- data.frame(
+  Ques_Type = ("Familiarity (Q10)"),
+  Chi_Square = fitMeasures(Q10_CFA, "chisq"),
+  df = fitMeasures(Q10_CFA,"df"),
+  P_value = fitMeasures(Q10_CFA, "pvalue"),
+  CFI = fitMeasures(Q10_CFA, "cfi"),
+  TLI = fitMeasures(Q10_CFA, "tli"),
+  RMSEA = fitMeasures(Q10_CFA, "rmsea"),
+  Raw_Alpha = Alpha$total$raw_alpha,
+  Std_Alpha = Alpha$total$std.alpha,
+  row.names = NULL
+)
+
+
+fam_table
+
+```
+
+
+## EFA AND CFA for Awareness of limitations Score Q18 and  Q15_4
+
+
+# Exploratory Factor Analysis
+
+
+```{r}
+
+Q_awa <- student_data_filtered |> select(Q18_1:Q18_5) |>
+  na.omit()
+
+
+factanal(Q_awa, factors = 1)
+
+
+```
+
+
+# Confirmatory Factor Analysis (CFA)
+
+
+```{r}
+
+Q_awa_model <- '
+  Qawa_factor =~ Q18_1 + Q18_2 + Q18_3 + Q18_4 + Q18_5
+'
+
+Q_awa_cfa <- cfa(model = Q_awa_model, data = student_data_filtered)
+
+summary(Q_awa_cfa, fit.measures = TRUE, standardized = TRUE)
+
+
+```
+
+
+```{r}
+Alpha1  <- psych::alpha(student_data_filtered |> dplyr::select(Q18_1:Q18_5))
+
+
+Alpha1$total
+```
+
+
+```{r}
+awa_table  <- data.frame(
+  Ques_Type = ("Awar of lim (Q18)"),
+  Chi_Square = fitMeasures(Q_awa_cfa, "chisq"),
+  df = fitMeasures(Q_awa_cfa,"df"),
+  P_value = fitMeasures(Q_awa_cfa, "pvalue"),
+  CFI = fitMeasures(Q_awa_cfa, "cfi"),
+  TLI = fitMeasures(Q_awa_cfa, "tli"),
+  RMSEA = fitMeasures(Q_awa_cfa, "rmsea"),
+  Raw_Alpha = Alpha1$total$raw_alpha,
+  Std_Alpha = Alpha1$total$std.alpha,
+  row.names = NULL
+)
+
+
+awa_table
+```
+
+
+## EFA AND CFA for Perceptions Q12 AND Q21
+
+# Exploratory Factor Analysis
+
+
+```{r}
+
+Q_per <- student_data_filtered |> select(Q12_1:Q12_2, Q21_1:Q21_2,Q21_4) |>
+  na.omit()
+
+
+factanal(Q_per,factors = 1)
+
+
+```
+
+
+# Confirmatory Factor Analysis (CFA)
+
+
+```{r}
+
+Q_per_model <- '
+  Q12_factor =~ Q12_1 + Q12_2 + Q21_1 + Q21_2 + Q21_4
+'
+
+Q_per_cfa <- cfa(model = Q_per_model, data = student_data_filtered)
+
+summary(Q_per_cfa, fit.measures = TRUE, standardized = TRUE)
+
+
+```
+
+
+```{r}
+
+Alpha2 <- psych::alpha(
+  student_data_filtered |> dplyr::select(Q12_1:Q12_2, Q21_1:Q21_2, Q21_4)
+)
+
+Alpha2$total
+```
+
+
+# Table
+
+```{r}
+
+per_table  <- data.frame(
+  Ques_Type = ("Perception (Q12,Q21)"),
+  Chi_Square = fitMeasures(Q_per_cfa, "chisq"),
+  df = fitMeasures(Q_per_cfa,"df"),
+  P_value = fitMeasures(Q_per_cfa, "pvalue"),
+  CFI = fitMeasures(Q_per_cfa, "cfi"),
+  TLI = fitMeasures(Q_per_cfa, "tli"),
+  RMSEA = fitMeasures(Q_per_cfa, "rmsea"),
+  Raw_Alpha = Alpha2$total$raw_alpha,
+  Std_Alpha = Alpha2$total$std.alpha,
+  row.names = NULL
+)
+
+
+per_table
+
+
+```
+
+
+# Confirmatory Factor Analysis Results
+
+```{r}
+
+Summary_Table <- bind_rows(fam_table,awa_table,per_table)
+
+Summary_Table
+
+```
+
+
