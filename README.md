@@ -1,4 +1,4 @@
- # GenAI-Stats-DataScience-Education-HBCU
+ ### GenAI-Stats-DataScience-Education-HBCU
 
 This repository contains the data, analysis code, reproducibility output, and survey materials associated with the study:
 
